@@ -10,6 +10,14 @@ by the Xbox's GPU every second frame (about 25-29 pictures a second), in
 64 MB. Tested in the attract mode; whole races are not yet verified. (xemu
 runs it too, much slower than a console.)
 
+<p>
+  <img src="images/xbox-title.png" width="49%" alt="The title screen on an original Xbox">
+  <img src="images/xbox-race.png" width="49%" alt="The attract mode's race on an original Xbox">
+</p>
+
+*On an original Xbox, captured from the console's screen over the debug
+connection.*
+
 ## Build it
 
 You need Python 3.10+, Git, CMake, Visual Studio 2022 with C++ (as for the

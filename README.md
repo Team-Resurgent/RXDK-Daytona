@@ -3,7 +3,12 @@
 **RXDK-Daytona** brings this recompilation to the **original Xbox**, built
 with [RXDK](https://github.com/Team-Resurgent): one command turns your own
 ROM set into a ready-to-copy Xbox folder and disc image. See
-[platform/xboxog](platform/xboxog/README.md). It is based on
+[platform/xboxog](platform/xboxog/README.md).
+
+![Daytona USA running on an original Xbox](platform/xboxog/images/xbox-race.png)
+
+*Running on an original Xbox, captured from the console.*
+ It is based on
 [alphanu1/daytona-arcade-recomp](https://github.com/alphanu1/daytona-arcade-recomp)
 (BSD-3-Clause, [LICENSE](LICENSE)), whose desktop, Vita and Dreamcast builds
 remain as they were.
