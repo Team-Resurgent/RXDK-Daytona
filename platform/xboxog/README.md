@@ -22,13 +22,22 @@ connection.*
 
 ## Build it
 
-You need Python 3.10+, Git, CMake, Visual Studio 2022 with C++ (as for the
-desktop build, see the [main README](../../README.md)) and RXDK v1.3.8 or
-newer. Then, from the project folder:
+First install RXDK (v1.3.8 or newer) with its extension for
+[Visual Studio](https://github.com/Team-Resurgent/RXDK-VS20XX/releases/latest)
+or [VS Code](https://github.com/Team-Resurgent/RXDK-VSCode/releases/latest).
+(The archived Team-Resurgent/RXDK installer, 1.4.x, is older: it will not do.)
+
+Then, on Windows, from the project folder, one command installs anything
+else the build needs (Git, CMake, Ninja, Python and the Visual Studio 2022
+C++ tools with Clang, through winget, skipping what you have) and builds:
+
+    powershell -ExecutionPolicy Bypass -File platform\xboxog\build.ps1 C:\path\to\daytona.zip
+
+With those tools already installed, `build.py` alone does the build:
 
     python platform/xboxog/build.py --rom C:\path\to\daytona.zip
 
-`--rom` takes your MAME ROM set as a `.zip`, a `.7z` (named `daytona.7z` or
+The ROM set can be a `.zip`, a `.7z` (named `daytona.7z` or
 `daytona93.7z`) or a folder of its files; a clone set and its parent may be
 given together. Both `daytona` (Revision A, 1994) and `daytona93`
 (Deluxe '93) are accepted; Revision A is the tested one. The first build

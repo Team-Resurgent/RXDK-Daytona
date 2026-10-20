@@ -29,8 +29,8 @@ Steps (each is skipped when its output is already up to date):
   6. the RXDK build (rxdk build), then the dist/ folder and disc image.
 
 Needs: Python 3.10+, Git, CMake and Visual Studio 2022 with C++ (as
-scripts/setup.py), and RXDK v1.3.8 or newer (RXDK_CLI or RXDK may point at
-a particular one).
+scripts/setup.py), and RXDK v1.3.8 or newer from its Visual Studio or VS Code
+extension (RXDK_CLI or RXDK may point at a particular one).
 """
 from __future__ import annotations
 
@@ -52,6 +52,12 @@ TITLE = "Daytona USA"
 # The program ROMs that tell the two sets apart (scripts/setup.py ROM_REJECTED).
 SETS = {"daytona": "epr-16722a.12", "daytona93": "epr-16530a.12"}
 MIN_RXDK = (1, 3, 8)  # libdsound before 1.3.8 called libc's sin/pow as __stdcall
+# The archived Team-Resurgent/RXDK installer (2025) numbered its releases
+# 1.4.0-1.4.2: higher, but older than the current 1.3.x line.
+LEGACY_RXDK = ((1, 4, 0), (1, 4, 2))
+GET_RXDK = ("Install the current RXDK with its extension for Visual Studio\n"
+            "(https://github.com/Team-Resurgent/RXDK-VS20XX/releases/latest) or for VS Code\n"
+            "(https://github.com/Team-Resurgent/RXDK-VSCode/releases/latest)")
 
 
 def say(message: str) -> None:
@@ -115,7 +121,33 @@ def import_rom(paths: list[Path]) -> tuple[str, Path]:
     return romset, target
 
 
-def recompile(romset: str, rom: Path) -> Path:
+TOOLS_MISSING = """
+build: {tools} not found. The build needs Git, CMake and Visual Studio 2022's
+C++ tools. On Windows, platform\\xboxog\\build.ps1 installs what is missing and
+then runs this build, in one go:
+
+    powershell -ExecutionPolicy Bypass -File platform\\xboxog\\build.ps1 {rom}
+"""
+
+
+def ensure_tools(rom_args: list[Path]) -> None:
+    """Git and CMake on PATH: found where their installers put them when a
+    terminal opened before they were installed does not have them yet."""
+    places = {"cmake": [r"C:\Program Files\CMake\bin"], "git": [r"C:\Program Files\Git\cmd"]}
+    missing = []
+    for tool, folders in places.items():
+        if shutil.which(tool):
+            continue
+        folder = next((f for f in folders if os.name == "nt" and (Path(f) / f"{tool}.exe").exists()), None)
+        if folder:
+            os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+        else:
+            missing.append(tool)
+    if missing:
+        sys.exit(TOOLS_MISSING.format(tools=" and ".join(missing), rom=" ".join(str(p) for p in rom_args)))
+
+
+def recompile(romset: str, rom: Path, rom_args: list[Path]) -> Path:
     """The desktop build of the set, with its imported ROM images and generated code."""
     build = ROOT / ("build" if romset == "daytona93" else f"build-{romset}")
     stamp = build / ".xboxog-rom"
@@ -123,6 +155,7 @@ def recompile(romset: str, rom: Path) -> Path:
     if (build / "gen" / romset).is_dir() and stamp.exists() and stamp.read_text() == rom_hash:
         print(f"{build.relative_to(ROOT)}: game code already generated from this ROM set")
         return build
+    ensure_tools(rom_args)
     say("Fetching the pinned sources (scripts/setup.py)")
     run([sys.executable, ROOT / "scripts/setup.py", "--no-build"], cwd=ROOT)
     say(f"Configuring the desktop build of {romset}")
@@ -167,8 +200,7 @@ def rxdk() -> tuple[Path, Path]:
         candidates.append(Path(shutil.which("rxdk")))
     found = next((c for c in candidates if c.exists()), None)
     if not found:
-        sys.exit("build: RXDK not found. Install it (https://github.com/Team-Resurgent), or set RXDK to its folder "
-                 "or RXDK_CLI to Rxdk.Cli.exe")
+        sys.exit(f"build: RXDK not found. {GET_RXDK}, or set RXDK to its folder or RXDK_CLI to Rxdk.Cli.exe.")
     version_file = root / "sdk/VERSION"
     if version_file.exists():
         text = version_file.read_text().strip().lstrip("v")
@@ -176,9 +208,8 @@ def rxdk() -> tuple[Path, Path]:
             version = tuple(int(x) for x in text.split(".")[:3])
         except ValueError:
             version = None
-        if version and version < MIN_RXDK:
-            sys.exit(f"build: RXDK {text} is too old (its DirectSound library corrupts the stack); "
-                     f"update to v{'.'.join(map(str, MIN_RXDK))} or newer")
+        if version and (version < MIN_RXDK or LEGACY_RXDK[0] <= version <= LEGACY_RXDK[1]):
+            sys.exit(f"build: RXDK {text} is too old (its DirectSound library corrupts the stack). {GET_RXDK}.")
     return found, root
 
 
@@ -220,7 +251,7 @@ def main() -> int:
     romset, rom = import_rom(args.rom)
     print(f"{rom.relative_to(ROOT)}: {romset}")
     cli, root = rxdk()  # before the long steps: fail early without RXDK
-    build = recompile(romset, rom)
+    build = recompile(romset, rom, args.rom)
     nvram = single_cabinet(build, romset)
 
     say("The Xbox data and projects")

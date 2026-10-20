@@ -1,7 +1,7 @@
 # One-step setup for Windows 10/11: installs the build prerequisites with
 # winget, then fetches the pinned dependencies and builds (scripts/setup.py).
 #
-#   powershell -ExecutionPolicy Bypass -File setup.ps1 [--msvc] [--test-extras] [--with-mame]
+#   powershell -ExecutionPolicy Bypass -File setup.ps1 [--msvc] [--tools-only] [--test-extras] [--with-mame]
 #
 # Installs (skipping what is already there): Git, CMake, Ninja, Python 3 and
 # Visual Studio 2022 Build Tools with the C++ workload and its Clang tools
@@ -11,6 +11,8 @@
 # instead. SDL 3 is fetched and built with the project; Vulkan comes with the
 # GPU driver. Put your own ROM set at roms\daytona93.zip (Deluxe '93) and/or
 # roms\daytona.zip (Revision A, 1994) to have the game recompiled too.
+# --tools-only installs the prerequisites and stops (platform\xboxog\build.ps1
+# uses it before its own build).
 
 $ErrorActionPreference = 'Stop'
 Set-Location -Path $PSScriptRoot
@@ -37,15 +39,14 @@ Install-Package 'Ninja-build.Ninja'
 Install-Package 'Python.Python.3.12'
 # --msvc: Microsoft's compiler instead of Clang. The rest goes to setup.py.
 $useMsvc = $args -contains '--msvc'
-$setupArgs = @($args | Where-Object { $_ -ne '--msvc' })
+$toolsOnly = $args -contains '--tools-only'
+$setupArgs = @($args | Where-Object { $_ -ne '--msvc' -and $_ -ne '--tools-only' })
 
 # The C++ tools, with Clang (clang-cl and the ClangCL toolset).
 $vsComponents = @('Microsoft.VisualStudio.Workload.VCTools',
                   'Microsoft.VisualStudio.Component.VC.Llvm.Clang',
                   'Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset')
 $vsAdd = ($vsComponents | ForEach-Object { "--add $_" }) -join ' '
-Install-Package 'Microsoft.VisualStudio.2022.BuildTools' "--wait --passive --norestart $vsAdd --includeRecommended"
-
 $installerDir = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
 $vswhere = Join-Path $installerDir 'vswhere.exe'
 function Test-VsClang {
@@ -53,6 +54,13 @@ function Test-VsClang {
     $found = & $vswhere -latest -version '[17,18)' -products * -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang `
         Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset -property installationPath
     return [bool]$found
+}
+# A Visual Studio 2022 that already has the C++ and Clang tools (Community,
+# Professional, Enterprise or Build Tools) will do: no second install.
+if (Test-VsClang) {
+    Write-Host "== Visual Studio 2022 with the Clang tools already installed"
+} else {
+    Install-Package 'Microsoft.VisualStudio.2022.BuildTools' "--wait --passive --norestart $vsAdd --includeRecommended"
 }
 
 if (-not $useMsvc -and -not (Test-VsClang)) {
@@ -92,6 +100,7 @@ $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
 $python = (Get-Command py -ErrorAction SilentlyContinue)
 if (-not $python) { $python = (Get-Command python -ErrorAction SilentlyContinue) }
 if (-not $python) { Write-Error "Python was installed but is not on PATH yet; open a new terminal and run setup.ps1 again." }
+if ($toolsOnly) { exit 0 }
 
 & $python.Source scripts\setup.py @setupArgs
 exit $LASTEXITCODE
