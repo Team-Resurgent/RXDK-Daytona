@@ -56,25 +56,25 @@ public:
             std::memcpy(static_cast<uint8_t *>(locked.pBits) + size_t(y) * locked.Pitch, pixels.data() + size_t(y) * width,
                         size_t(width) * 4);
         screen_->UnlockRect(0);
-        draw_texture(screen_, float(width), float(height), 0, 0, float(kWidth), float(kHeight), false);
+        draw_texels(screen_, 0, 0, float(width), float(height), 0, 0, float(kWidth), float(kHeight), false);
     }
 
-    // A linear texture's w x h texels (linear textures take texel, not
-    // normalized, coordinates) over the screen rectangle x, y, cw, ch.
-    void draw_texture(IDirect3DTexture8 *texture, float w, float h, float x, float y, float cw, float ch, bool blend) {
+    // Texels (u0, v0)-(u1, v1) of a linear texture (linear textures take
+    // texel, not normalized, coordinates) over the screen rectangle x, y,
+    // cw, ch; with blend, texels of alpha 0 are left out (the alpha test).
+    void draw_texels(IDirect3DTexture8 *texture, float u0, float v0, float u1, float v1, float x, float y, float cw,
+                     float ch, bool blend) {
         struct Vertex { float x, y, z, rhw, u, v; };
         const Vertex quad[4] = {
-            {x - .5f, y - .5f, 0, 1, 0, 0},
-            {x + cw - .5f, y - .5f, 0, 1, w, 0},
-            {x - .5f, y + ch - .5f, 0, 1, 0, h},
-            {x + cw - .5f, y + ch - .5f, 0, 1, w, h},
+            {x - .5f, y - .5f, 0, 1, u0, v0},
+            {x + cw - .5f, y - .5f, 0, 1, u1, v0},
+            {x - .5f, y + ch - .5f, 0, 1, u0, v1},
+            {x + cw - .5f, y + ch - .5f, 0, 1, u1, v1},
         };
         device_->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
         device_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
         device_->SetRenderState(D3DRS_LIGHTING, FALSE);
-        device_->SetRenderState(D3DRS_ALPHABLENDENABLE, blend);
-        device_->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
-        device_->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+        device_->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
         device_->SetRenderState(D3DRS_ALPHATESTENABLE, blend);
         device_->SetRenderState(D3DRS_ALPHAREF, 0x80);
         device_->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATEREQUAL);

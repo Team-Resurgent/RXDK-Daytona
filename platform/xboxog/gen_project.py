@@ -11,8 +11,10 @@
                               fetched into extern/
 
 Every project is built with the Dreamcast port's runtime definitions
-(platform/dreamcast/Makefile GAME_DEFS, without M2_DC_SPEED: that one
-composes the tile layers in the PVR's 16-bit formats).
+(platform/dreamcast/Makefile GAME_DEFS): its memory layout and its fast
+paths, M2_DC_SPEED, which compose the tile layers in 16-bit formats only
+when they change and need the i960 and TGP code rewritten by
+platform/dreamcast/scripts/fast_gen.py (run here, into <build>/xboxog-fast).
 """
 from __future__ import annotations
 
@@ -20,6 +22,8 @@ import argparse
 import json
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -53,7 +57,7 @@ def main() -> int:
                         "(default: build-daytona for daytona, build for daytona93)")
     args = parser.parse_args()
     build = (args.build_dir or ROOT / ("build-daytona" if args.set == "daytona" else "build")).resolve()
-    defines = [f'M2_ROMSET="{args.set}"', "M2_DC_MEMORY", "M2_DC_SPIN_SKIP", "NDEBUG", "NOMINMAX"] + SOFTFLOAT_PUBLIC
+    defines = [f'M2_ROMSET="{args.set}"', "M2_DC_MEMORY", "M2_DC_SPIN_SKIP", "M2_DC_SPEED", "NDEBUG", "NOMINMAX"] + SOFTFLOAT_PUBLIC
 
     softfloat = HERE / "libs/softfloat"
     listed = (ROOT / "cmake/softfloat_sources.cmake").read_text()
@@ -78,11 +82,17 @@ def main() -> int:
 
     gamecode = HERE / "gamecode"
     gen = build / "gen" / args.set
-    tgp, snd = build / "gen" / f"{args.set}_tgp/tgp_gen.cpp", build / "gen" / f"{args.set}_snd/snd_gen.cpp"
-    code = sorted(gen.glob("*.cpp")) + [tgp, snd]
-    missing = [str(p) for p in (tgp, snd) if not p.exists()] + ([] if len(code) > 2 else [str(gen)])
-    if missing:
-        raise SystemExit("generate the game code first (scripts/setup.py); missing: " + ", ".join(missing))
+    snd = build / "gen" / f"{args.set}_snd/snd_gen.cpp"
+    if not any(gen.glob("*.cpp")) or not snd.exists():
+        raise SystemExit(f"generate the game code first (scripts/setup.py): nothing in {gen}")
+    # The i960 code with fewer lockstep checks and the TGP code with its count
+    # in a local (fast_gen.py rewrites only the files whose output changes).
+    fast = build / "xboxog-fast"
+    fast_gen = ROOT / "platform/dreamcast/scripts/fast_gen.py"
+    for name in (args.set, f"{args.set}_tgp"):
+        if subprocess.run([sys.executable, str(fast_gen), str(build / "gen" / name), str(fast / name)]).returncode:
+            raise SystemExit(f"fast_gen.py failed on {build / 'gen' / name}")
+    code = sorted((fast / args.set).glob("*.cpp")) + [fast / f"{args.set}_tgp/tgp_gen.cpp", snd]
     write(gamecode, {
         "name": "gamecode", "type": "library", "configuration": "release",
         "sources": [rel(p, gamecode) for p in code],

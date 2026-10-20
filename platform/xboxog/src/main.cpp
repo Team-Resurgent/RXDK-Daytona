@@ -35,6 +35,7 @@ constexpr const char *kData = "D:\\data\\";
 constexpr const char *kEeprom = "T:\\ioboard_eeprom.bin";
 constexpr const char *kBackup = "T:\\backup_ram.bin";
 constexpr int kReport = 575; // frames between log lines (10 s)
+constexpr int kDrawEvery = 2;  // frames per picture: the board's geometry and tile layers only for those
 constexpr size_t kCachePages = 4096; // 16 MB of ROM pages (rom.h): of 48 MB of real ROM data
 
 void log(const char *format, ...) {
@@ -144,32 +145,45 @@ void run() {
 
     const double frame_us = 1e6 / rt::GameLoop::kFrameHz;
     const uint64_t start = now_us();
-    uint64_t frames = 0, presented = 0, skipped = 0, run_us = 0, draw_us = 0;
-    int behind = 0;
+    uint64_t frames = 0, presented = 0, skipped = 0, run_us = 0, draw_us = 0, sound_us = 0;
+    // Where a frame's time goes (the runtime's profile): i960, TGP and
+    // scheduling ("core"), geometry, and the tile layers ("video").
+    uint64_t core_us = 0, geometry_us = 0, video_us = 0;
+    game->set_profile_clock(now_us);
+    // Draw mode, as the Dreamcast: the game runs every frame, its picture
+    // (geometry and tile layers) is made and shown every kDrawEvery-th.
+    game->set_frame_skip(kDrawEvery - 1);
     for (;;) {
         const uint64_t t0 = now_us();
         game->run_frame(pad.sample());
+        const rt::FrameProfile &profile = game->last_profile();
+        core_us += profile.core();
+        geometry_us += profile.geometry;
+        video_us += profile.video;
+        const uint64_t ts = now_us();
         audio.frame(game->board().take_sound_bytes());
         ++frames;
         const uint64_t t1 = now_us();
-        run_us += t1 - t0;
-        // Behind real time by more than two frames: skip showing this one
-        // (at most three in a row) to catch up.
-        const double due = double(frames) * frame_us, wall = double(t1 - start);
-        if (wall > due + 2 * frame_us && behind < 3) {
-            ++skipped;
-            ++behind;
-        } else {
-            behind = 0;
-            display.clear();
-            if (renderer) renderer->draw(game->board().video());
-            else display.draw_screen(game->board().video());
-            display.present();
-            ++presented;
-            draw_us += now_us() - t1;
-            const double ahead = due - double(now_us() - start);
-            if (ahead > 1500) Sleep(DWORD(ahead / 1000));
+        run_us += ts - t0;
+        sound_us += t1 - ts;
+        // Just after a screen update (vblank_end updates when frame %
+        // kDrawEvery is 0, then counts on), unless behind real time by more
+        // than kDrawEvery frames: then that picture is skipped to catch up.
+        const double due = double(frames) * frame_us;
+        if (game->board().frame() % kDrawEvery == 1 % kDrawEvery) {
+            if (double(t1 - start) > due + kDrawEvery * frame_us) {
+                ++skipped;
+            } else {
+                display.clear();
+                if (renderer) renderer->draw(game->board().video());
+                else display.draw_screen(game->board().video());
+                display.present();
+                ++presented;
+                draw_us += now_us() - t1;
+            }
         }
+        const double ahead = due - double(now_us() - start);
+        if (ahead > 1500) Sleep(DWORD(ahead / 1000));
         if (frames % kReport == 0) {
             log("Daytona: frame %llu, %.1f s; presented %llu skipped %llu; ms/frame run %.1f draw %.1f; "
                 "ROM misses %llu (%.0f ms reading); sound underruns %llu; polygons %u textured %u materials %u (%u KB) hd %u dumped %u; %u KB free\n",
@@ -179,7 +193,11 @@ void run() {
                 renderer ? unsigned(renderer->materials()) : 0u,
                 renderer ? unsigned(renderer->texture_bytes() / 1024) : 0u, renderer ? renderer->hd_loaded : 0u,
                 hd.dumps, free_kb());
-            run_us = draw_us = 0;
+            log("Daytona: profile ms/frame: core %.1f geometry %.1f video %.1f sound %.1f; draw %.1f per shown frame\n",
+                core_us / 1000.0 / kReport, geometry_us / 1000.0 / kReport, video_us / 1000.0 / kReport,
+                sound_us / 1000.0 / kReport, presented ? draw_us / 1000.0 / double(presented) : 0.0);
+            run_us = draw_us = sound_us = core_us = geometry_us = video_us = 0;
+            presented = skipped = 0;
             if (game->board().io().eeprom_dirty) {
                 save(*game);
                 game->board().io().eeprom_dirty = false;

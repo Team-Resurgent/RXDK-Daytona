@@ -5,8 +5,10 @@ Daytona USA on the original Xbox (733 MHz Pentium III, 64 MB), built with
 the desktop build: the game code is generated from your own ROM set, so the
 result is yours alone and is never shared.
 
-Status: the attract mode runs and is drawn by the Xbox's GPU, at 64 MB, in
-xemu. Not yet measured on a console; full speed there is not established.
+Status: runs on a console at the arcade's full 57.5 Hz, the picture drawn
+by the Xbox's GPU every second frame (about 25-29 pictures a second), in
+64 MB. Tested in the attract mode; whole races are not yet verified. (xemu
+runs it too, much slower than a console.)
 
 ## Build it
 
@@ -65,20 +67,25 @@ replacement, lit but not tinted.
 - `stage_data.py`: the imported images into `game/data` (`D:\data` on the
   Xbox), the ROM regions cut after their last nonzero page.
 - `gen_project.py`: the RXDK projects. The title (`src/`, the runtime) and,
-  as libraries, the generated game code (at `-Os`), SoftFloat and ymfm.
-  Everything is built with the Dreamcast port's low-memory runtime
-  (`M2_DC_MEMORY`, `M2_DC_SPIN_SKIP`).
+  as libraries, the generated game code (at `-Os`, rewritten first by the
+  Dreamcast's `fast_gen.py`), SoftFloat and ymfm. Everything is built with
+  the Dreamcast port's low-memory runtime and its fast paths
+  (`M2_DC_MEMORY`, `M2_DC_SPIN_SKIP`, `M2_DC_SPEED`): the tile layers in
+  16-bit formats, composed only when they change, and geometry and layers
+  only for the frames that are shown.
 
 The frontend, in `src/`:
 
 - `rom.h`: the 48 MB of ROM regions read from `D:\data` a page at a time
   into a 16 MB cache.
-- `renderer.h`: the polygons through Direct3D 8, a port of the Dreamcast's
+- `renderer.h`: the 16-bit tile layers (the race's scenery as a scrolled
+  layer) and the polygons through Direct3D 8, a port of the Dreamcast's
   PVR renderer, with textures cached by content (`hd.h`: the replacements
   and dumps).
 - `audio.h`: the native sound sequencer into DirectSound.
 - `input.h`: the controller as the cabinet.
-- `main.cpp`: the loop, paced to the board's 57.52 Hz.
+- `main.cpp`: the loop, paced to the board's 57.52 Hz, a picture every
+  second frame.
 
 Its log goes to the debug output (serial in xemu): memory, frame times, ROM
 cache misses, polygons and textures every 10 seconds.

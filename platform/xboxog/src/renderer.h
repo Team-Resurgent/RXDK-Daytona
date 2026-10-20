@@ -2,8 +2,10 @@
 // the game's polygons over them, then the front tile layers (their empty
 // pixels see-through), 496x384 at 640x480 (scaled 1.25, centred). The
 // runtime is in external 3D mode (Video::set_external_3d, with the
-// Dreamcast's M2_DC_MEMORY composing both layers on the CPU): it hands over
-// this frame's polygons and both tile layers and draws no 3D.
+// Dreamcast's M2_DC_MEMORY and M2_DC_SPEED: both layers composed in 16-bit
+// formats, only when they change, and the race's scenery as a separately
+// scrolled layer): it hands over this frame's polygons and the layers and
+// draws no 3D.
 //
 // A port of platform/dreamcast/game/renderer.h, which documents the order
 // and the shading approximation: descending window, ascending z, newest
@@ -22,6 +24,10 @@
 // times the light alone); with dumping on, each new material is written to
 // T:\dump\<key>.tga at its source size.
 #pragma once
+
+#ifndef M2_DC_SPEED
+#error "renderer.h draws the runtime's 16-bit layers: build with M2_DC_SPEED"
+#endif
 
 #include <xtl.h>
 #include <xgraphics.h>
@@ -45,17 +51,32 @@ class Renderer {
 public:
     explicit Renderer(Display &display, HdTextures &hd) : display_(display), device_(display.device()), hd_(hd) {
         for (int i = 0; i < 256; i++) gamma_[i] = uint8_t(std::max((double(i) - 64.0) * 255.0 / 191.0, 0.0));
-        if (FAILED(device_->CreateTexture(512, 512, 1, 0, D3DFMT_LIN_X8R8G8B8, 0, &background_)) ||
-            FAILED(device_->CreateTexture(512, 512, 1, 0, D3DFMT_LIN_A8R8G8B8, 0, &foreground_)))
+        // The runtime's 16-bit layers (M2_DC_SPEED): the background RGB565,
+        // or ARGB1555 over the scrolled layer; the front layers ARGB1555, 0
+        // see-through; the scrolled layer's 512 x 512 pixmap RGB565.
+        if (FAILED(device_->CreateTexture(512, 512, 1, 0, D3DFMT_LIN_R5G6B5, 0, &background_)) ||
+            FAILED(device_->CreateTexture(512, 512, 1, 0, D3DFMT_LIN_A1R5G5B5, 0, &background_over_)) ||
+            FAILED(device_->CreateTexture(512, 512, 1, 0, D3DFMT_LIN_A1R5G5B5, 0, &foreground_)) ||
+            FAILED(device_->CreateTexture(512, 512, 1, 0, D3DFMT_LIN_R5G6B5, 0, &scroll_)))
             throw std::runtime_error("no memory for the tile layer textures");
         vertices_.reserve(kBatchVertices);
     }
 
-    // video: after a frame, in external 3D mode.
+    // video: after a drawn frame, in external 3D mode.
     void draw(const rt::Video &video) {
         ++frame_;
-        upload(video.background_layer(), background_);
-        upload(video.foreground_layer(), foreground_);
+        // A layer the runtime did not compose again is already in its texture.
+        const bool scrolled = video.back_scrolled();
+        if (video.background16_generation() != back_uploaded_ || scrolled != back_scrolled_) {
+            upload(video.background16(), scrolled ? background_over_ : background_);
+            back_uploaded_ = video.background16_generation();
+            back_scrolled_ = scrolled;
+        }
+        if (video.foreground16_generation() != front_uploaded_) {
+            upload(video.foreground16(), foreground_);
+            front_uploaded_ = video.foreground16_generation();
+        }
+        if (scrolled) update_scroll(video);
         const auto &polys = video.gpu_polys();
         const rt::VideoMem &mem = video.gpu_mem();
         if (mem.tex_generation != tex_generation_) { // the game wrote texture RAM: check sources again
@@ -67,7 +88,12 @@ public:
         ++colour_stamp_;
         builds_ = 0;
 
-        display_.draw_texture(background_, float(kW), float(kH), kOffsetX, 0, kW * kScale, kH * kScale, false);
+        if (scrolled) {
+            scroll_quads(video.scroll_x(), video.scroll_y());
+            display_.draw_texels(background_over_, 0, 0, float(kW), float(kH), kOffsetX, 0, kW * kScale, kH * kScale, true);
+        } else {
+            display_.draw_texels(background_, 0, 0, float(kW), float(kH), kOffsetX, 0, kW * kScale, kH * kScale, false);
+        }
 
         // Materials front to back first: the build budget goes to what is
         // nearest (drawn last, largest on screen).
@@ -101,7 +127,7 @@ public:
         }
         flush();
         device_->SetTexture(0, nullptr);
-        display_.draw_texture(foreground_, float(kW), float(kH), kOffsetX, 0, kW * kScale, kH * kScale, true);
+        display_.draw_texels(foreground_, 0, 0, float(kW), float(kH), kOffsetX, 0, kW * kScale, kH * kScale, true);
     }
 
     // The last frame: polygons drawn (of them textured); the cache.
@@ -146,17 +172,57 @@ private:
         return poly.window <= video.gpu_windows() && poly.num_vertices >= 3 && poly.num_vertices <= 8;
     }
 
-    // ARGB8888 (kW wide) into a linear 512-wide texture.
-    static void upload(const std::vector<uint32_t> &layer, IDirect3DTexture8 *texture) {
-        if (layer.size() < size_t(kW) * kH) return;
+    // A 16-bit layer (rows of rt::Video::kLayerStride, the first kH shown)
+    // into a linear 512-wide texture.
+    static_assert(rt::Video::kLayerStride == 512, "a layer's rows are its texture's");
+    static void upload(const std::vector<uint16_t> &layer, IDirect3DTexture8 *texture) {
+        if (layer.size() < size_t(512) * kH) return;
         D3DLOCKED_RECT locked;
         if (FAILED(texture->LockRect(0, &locked, nullptr, 0))) return;
         for (int y = 0; y < kH; ++y)
-            std::memcpy(static_cast<uint8_t *>(locked.pBits) + size_t(y) * locked.Pitch, &layer[size_t(y) * kW],
-                        size_t(kW) * 4);
+            std::memcpy(static_cast<uint8_t *>(locked.pBits) + size_t(y) * locked.Pitch, &layer[size_t(y) * 512], 512 * 2);
         texture->UnlockRect(0);
     }
 
+    // The scrolled layer's texture: the 8 x 8 tiles whose pixels changed
+    // (all of them after a pen change), from the runtime's scroll_pixel.
+    void update_scroll(const rt::Video &video) {
+        const bool all = video.scroll_all_changed();
+        const uint8_t *changed = video.scroll_tiles_changed();
+        D3DLOCKED_RECT locked;
+        if (FAILED(scroll_->LockRect(0, &locked, nullptr, 0))) return;
+        for (uint32_t t = 0; t < 64 * 64; ++t) {
+            if (!all && !changed[t]) continue;
+            const uint32_t tx = (t & 63) * 8, ty = (t >> 6) * 8;
+            for (uint32_t y = ty; y < ty + 8; ++y) {
+                auto *row = reinterpret_cast<uint16_t *>(static_cast<uint8_t *>(locked.pBits) + size_t(y) * locked.Pitch);
+                for (uint32_t x = tx; x < tx + 8; ++x) row[x] = video.scroll_pixel(x, y);
+            }
+            ++scroll_tiles;
+        }
+        scroll_->UnlockRect(0);
+        const_cast<rt::Video &>(video).scroll_taken();
+    }
+
+    // The screen's kW x kH from (sx, sy) of the 512 x 512 scrolled layer,
+    // wrapping as the pixmap does: a linear texture cannot repeat, so the
+    // view is cut where it wraps, into up to four quads.
+    void scroll_quads(int sx, int sy) {
+        const float u0 = float(sx & 511), v0 = float(sy & 511);
+        const float wu = std::min(float(kW), 512.f - u0), hv = std::min(float(kH), 512.f - v0);
+        const float pieces[4][4] = {{u0, v0, 0, 0}, {0, v0, wu, 0}, {u0, 0, 0, hv}, {0, 0, wu, hv}};
+        for (const auto &p : pieces) {
+            const float w = p[2] ? float(kW) - wu : wu, h = p[3] ? float(kH) - hv : hv;
+            if (w <= 0 || h <= 0) continue;
+            display_.draw_texels(scroll_, p[0], p[1], p[0] + w, p[1] + h, kOffsetX + p[2] * kScale, p[3] * kScale,
+                                 w * kScale, h * kScale, false);
+        }
+    }
+
+public:
+    unsigned scroll_tiles = 0; // scrolled-layer tiles converted, since the start
+
+private:
     void sort(const std::vector<rt::GeoPoly> &polys) {
         const size_t count = polys.size();
         order_.resize(count);
@@ -394,7 +460,9 @@ private:
     Display &display_;
     IDirect3DDevice8 *device_;
     HdTextures &hd_;
-    IDirect3DTexture8 *background_ = nullptr, *foreground_ = nullptr;
+    IDirect3DTexture8 *background_ = nullptr, *background_over_ = nullptr, *foreground_ = nullptr, *scroll_ = nullptr;
+    uint64_t back_uploaded_ = ~0ull, front_uploaded_ = ~0ull;
+    bool back_scrolled_ = false;
     uint64_t frame_ = 0, tex_generation_ = ~0ull, source_epoch_ = 1;
     unsigned builds_ = 0;
     size_t texture_bytes_ = 0;
