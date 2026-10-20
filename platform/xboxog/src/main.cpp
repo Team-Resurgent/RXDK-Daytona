@@ -39,6 +39,12 @@ constexpr const char *kBackup = "T:\\backup_ram.bin";
 constexpr int kReport = 575; // frames between log lines (10 s)
 constexpr int kBehind = 4;     // frames behind real time before the game is let run slower
 constexpr int kDrawEvery = 2;  // frames per picture: the board's geometry and tile layers only for those
+// Falling behind for kBusyFrames in a row, a picture every third frame
+// instead (the board's geometry, tile layers and the drawing skipped on two
+// frames in three); back to every second after kSpareFrames with time to
+// spare. Changed only on a frame that is a multiple of 6, where both rates
+// draw: the board's per-frame skip decisions stay consistent.
+constexpr int kBusyFrames = 24, kSpareFrames = 172;
 constexpr size_t kCacheBlocks = 384; // 6 MB of unpacked ROM blocks (rom.h), of 48 MB packed into about 12
 
 void log(const char *format, ...) {
@@ -190,14 +196,28 @@ void run() {
     // scheduling ("core"), geometry, and the tile layers ("video").
     uint64_t core_us = 0, geometry_us = 0, video_us = 0, worst_us = 0, present_us = 0;
     game->set_profile_clock(now_us);
+    game->board().tgp().clock = now_us; // the TGP's share of "core"
+    uint64_t tgp_before = 0;
     // Draw mode, as the Dreamcast: the game runs every frame, its picture
     // (geometry and tile layers) is made and shown every kDrawEvery-th.
     game->set_frame_skip(kDrawEvery - 1);
+    int draw_every = kDrawEvery, busy = 0, spare = 0;
+    uint64_t sparse_frames = 0; // of the report, frames at a picture every third
     // The slowest frame of each report, stage by stage (ms): which one stalls.
     struct Spike { double total, core, geometry, video, sound, draw, rom_unpack; uint64_t frame; } worst = {};
     for (;;) {
         const uint64_t t0 = now_us(), unpack0 = rom.unpack_us;
         uint64_t frame_draw_us = 0;
+        if (game->board().frame() % 6 == 0) {
+            const int want = draw_every == kDrawEvery && busy >= kBusyFrames ? kDrawEvery + 1
+                           : draw_every != kDrawEvery && spare >= kSpareFrames ? kDrawEvery : draw_every;
+            if (want != draw_every) {
+                draw_every = want;
+                game->set_frame_skip(draw_every - 1);
+                busy = spare = 0;
+            }
+        }
+        if (draw_every != kDrawEvery) ++sparse_frames;
         game->run_frame(scripted ? script.at(game->board().frame()) : pad.sample());
         const rt::FrameProfile &profile = game->last_profile();
         core_us += profile.core();
@@ -219,12 +239,15 @@ void run() {
             start += debt;
             slowed_us += debt;
         }
+        // More than a frame behind: busy; the rate drops after kBusyFrames.
+        if (double(t1 - start) > due + frame_us) ++busy, spare = 0;
+        else busy = 0;
         // Just after a screen update (vblank_end updates when frame %
-        // kDrawEvery is 0, then counts on), unless behind real time by more
-        // than kDrawEvery frames: then that picture is skipped to catch up,
+        // draw_every is 0, then counts on), unless behind real time by more
+        // than draw_every frames: then that picture is skipped to catch up,
         // but never two in a row.
-        if (game->board().frame() % kDrawEvery == 1 % kDrawEvery) {
-            if (double(t1 - start) > due + kDrawEvery * frame_us && !skipped_last) {
+        if (game->board().frame() % draw_every == 1 % draw_every) {
+            if (double(t1 - start) > due + draw_every * frame_us && !skipped_last) {
                 ++skipped;
                 skipped_last = true;
             } else {
@@ -250,11 +273,16 @@ void run() {
         }
         const double ahead = due - double(now_us() - start);
         if (ahead > 1500) Sleep(DWORD(ahead / 1000));
+        // Time to spare (ahead by a third of a frame): counts towards the
+        // rate going back up.
+        if (ahead > frame_us / 3) ++spare;
+        else spare = 0;
         if (frames % kReport == 0) {
-            log("Daytona: frame %llu, %.1f s; presented %llu skipped %llu, slowed %.0f ms; ms/frame run %.1f draw %.1f; "
+            log("Daytona: frame %llu, %.1f s; presented %llu skipped %llu, slowed %.0f ms, %llu frames at 1/3; ms/frame run %.1f draw %.1f; "
                 "ROM blocks unpacked %llu (%.0f ms); sound underruns %llu; polygons %u textured %u materials %u (%u KB) hd %u dumped %u; %u KB free\n",
                 (unsigned long long)frames, double(now_us() - start) / 1e6, (unsigned long long)presented,
-                (unsigned long long)skipped, slowed_us / 1000.0, run_us / 1000.0 / kReport, presented ? draw_us / 1000.0 / kReport : 0.0,
+                (unsigned long long)skipped, slowed_us / 1000.0, (unsigned long long)sparse_frames,
+                run_us / 1000.0 / kReport, presented ? draw_us / 1000.0 / kReport : 0.0,
                 (unsigned long long)rom.misses, rom.unpack_us / 1000.0, (unsigned long long)audio.underruns, renderer ? renderer->drawn : 0u, renderer ? renderer->textured : 0u,
                 renderer ? unsigned(renderer->materials()) : 0u,
                 renderer ? unsigned(renderer->texture_bytes() / 1024) : 0u, renderer ? renderer->hd_loaded : 0u,
@@ -264,6 +292,9 @@ void run() {
                 core_us / 1000.0 / kReport, geometry_us / 1000.0 / kReport, video_us / 1000.0 / kReport,
                 sound_us / 1000.0 / kReport, presented ? draw_us / 1000.0 / double(presented) : 0.0,
                 presented ? present_us / 1000.0 / double(presented) : 0.0, worst_us / 1000.0);
+            log("Daytona: of core, the TGP's code %.1f ms/frame\n",
+                (game->board().tgp().run_ticks - tgp_before) / 1000.0 / kReport);
+            tgp_before = game->board().tgp().run_ticks;
             log("Daytona: worst frame %llu: %.1f ms = core %.1f (of it ROM unpacking %.1f) geometry %.1f video %.1f "
                 "sound %.1f draw %.1f\n",
                 (unsigned long long)worst.frame, worst.total, worst.core, worst.rom_unpack, worst.geometry, worst.video,
@@ -285,7 +316,7 @@ void run() {
                     renderer->evictions, unsigned(renderer->palettes()), renderer->palettes_made, renderer->drawn,
                     renderer->checkered);
             run_us = draw_us = sound_us = core_us = geometry_us = video_us = worst_us = present_us = 0;
-            presented = skipped = slowed_us = 0;
+            presented = skipped = slowed_us = sparse_frames = 0;
             if (game->board().io().eeprom_dirty) {
                 save(*game);
                 game->board().io().eeprom_dirty = false;

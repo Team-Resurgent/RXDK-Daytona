@@ -20,8 +20,9 @@ you, never to share.
 Steps (each is skipped when its output is already up to date):
   1. the ROM set into roms/<set>.zip;
   2. scripts/setup.py's toolchain check and pinned sources (extern/);
-  3. the desktop build of the set: the ROM import (every file checked) and
-     the game code recompiled to C++ (scripts/recompile.py);
+  3. the desktop tools for the set, in build-<set>-fast: the ROM import
+     (every file checked) and the game code recompiled to C++
+     (scripts/recompile.py --fast_inaccuracy, as the PS Vita port);
   4. Revision A only: its factory settings are a linked twin cabinet that
      waits for a second machine, so the desktop runs it through test mode
      (single_cabinet.txt) and keeps the settings as the Xbox's first ones;
@@ -147,11 +148,20 @@ def ensure_tools(rom_args: list[Path]) -> None:
         sys.exit(TOOLS_MISSING.format(tools=" and ".join(missing), rom=" ".join(str(p) for p in rom_args)))
 
 
+# The game code is generated as the PS Vita port's is, with
+# scripts/recompile.py --fast_inaccuracy: about a fifth less work for the
+# Xbox's CPU, enough to keep the busiest courses at full speed. Its
+# interrupts are not instruction-exact against MAME (recorded replays can
+# drift from the arcade's); play is the same. Its own build folder keeps it
+# apart from the desktop builds' exact code.
+GENERATION = "fast_inaccuracy"
+
+
 def recompile(romset: str, rom: Path, rom_args: list[Path]) -> Path:
-    """The desktop build of the set, with its imported ROM images and generated code."""
-    build = ROOT / ("build" if romset == "daytona93" else f"build-{romset}")
+    """The desktop tools for the set, its imported ROM images and its generated code."""
+    build = ROOT / f"build-{romset}-fast"
     stamp = build / ".xboxog-rom"
-    rom_hash = hashlib.sha256(rom.read_bytes()).hexdigest()
+    rom_hash = hashlib.sha256(rom.read_bytes()).hexdigest() + ":" + GENERATION
     if (build / "gen" / romset).is_dir() and stamp.exists() and stamp.read_text() == rom_hash:
         print(f"{build.relative_to(ROOT)}: game code already generated from this ROM set")
         return build
@@ -164,7 +174,7 @@ def recompile(romset: str, rom: Path, rom_args: list[Path]) -> Path:
     shutil.rmtree(build / "rom_cache" / romset, ignore_errors=True)
     say("Checking your ROM set and recompiling the game code (scripts/recompile.py)")
     r = subprocess.run([sys.executable, str(ROOT / "scripts/recompile.py"), "--set", romset,
-                        "--build-dir", build.name], cwd=ROOT)
+                        "--build-dir", build.name, "--" + GENERATION], cwd=ROOT)
     if r.returncode == 3:  # recompile.py's ROM_REJECTED_EXIT
         sys.exit(setup.ROM_REJECTED.format(set=romset))
     if r.returncode:
@@ -257,7 +267,7 @@ def main() -> int:
     say("The Xbox data and projects")
     stage = [sys.executable, HERE / "stage_data.py", "--set", romset, "--build-dir", build]
     run(stage + (["--nvram", nvram] if nvram else []))
-    run([sys.executable, HERE / "gen_project.py", "--set", romset, "--build-dir", build])
+    run([sys.executable, HERE / "gen_project.py", "--set", romset, "--build-dir", build, "--generated-as-is"])
 
     say(f"Building the Xbox title with RXDK ({cli})")
     run([cli, "build", "--project-root", HERE], cwd=HERE)

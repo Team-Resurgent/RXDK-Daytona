@@ -6,11 +6,11 @@ the desktop build: the game code is generated from your own ROM set, so the
 result is yours alone and is never shared.
 
 Status: runs on a console at the arcade's 57.5 Hz, the picture drawn by
-the Xbox's GPU every second frame, in 64 MB: about 28 pictures a second in
-the attract mode, 21-27 in the busiest stretches of a race, where the game
-may also run a little slower for a moment rather than freeze the picture.
-Tested with the attract mode and a recorded race on a console. (xemu runs
-it too, much slower than a console.)
+the Xbox's GPU, in 64 MB: a picture every second frame (about 28 a second)
+in the attract mode, every third (about 19) when a race gets busy, so the
+game itself keeps full speed. Tested with the attract mode and recorded
+races on the beginner and advanced courses on a console. (xemu runs it too,
+much slower than a console.)
 
 <p>
   <img src="images/xbox-title.png" width="49%" alt="The title screen on an original Xbox">
@@ -81,13 +81,18 @@ replacement, lit but not tinted.
 
 `build.py` drives the steps, each a script of its own:
 
-- `scripts/setup.py` and `scripts/recompile.py` (the desktop's): the ROM
-  import, which checks every file, and the game code generated from it.
+- `scripts/setup.py` and `scripts/recompile.py` (the desktop's), in
+  `build-<set>-fast`: the ROM import, which checks every file, and the game
+  code generated from it with `--fast_inaccuracy`, as for the PS Vita: about
+  a fifth less work for the CPU, enough to keep the busiest courses at full
+  speed, with interrupts that are not instruction-exact against MAME
+  (recorded replays can drift from the arcade's; play is the same).
 - `stage_data.py`: the imported images into `game/data` (`D:\data` on the
   Xbox, about 21 MB), the ROM regions packed (`<name>.z`).
 - `gen_project.py`: the RXDK projects. The title (`src/`, the runtime) and,
-  as libraries, the generated game code (at `-Os`, rewritten first by the
-  Dreamcast's `fast_gen.py`), SoftFloat and ymfm. Everything is built with
+  as libraries, the generated game code (at `-O2`; exactly generated code
+  is rewritten first by the Dreamcast's `fast_gen.py`, `--fast_inaccuracy`
+  code is used as it is), SoftFloat and ymfm. Everything is built with
   the Dreamcast port's low-memory runtime and its fast paths
   (`M2_DC_MEMORY`, `M2_DC_SPIN_SKIP`, `M2_DC_SPEED`): the tile layers in
   16-bit formats, composed only when they change, and geometry and layers
@@ -106,8 +111,10 @@ The frontend, in `src/`:
   palettes (`hd.h`: the replacements and dumps).
 - `audio.h`: the native sound sequencer into DirectSound.
 - `input.h`: the controller as the cabinet.
-- `main.cpp`: the loop, paced to the board's 57.52 Hz, a picture every
-  second frame.
+- `main.cpp`: the loop, paced to the board's 57.52 Hz: a picture every
+  second frame, every third while the game is falling behind (back to
+  every second after 3 seconds with time to spare), and never two pictures
+  skipped in a row.
 
 Its log goes to the debug output (serial in xemu): every 10 seconds memory,
 frame times by stage, the slowest frame and what it spent its time on, ROM

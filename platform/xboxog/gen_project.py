@@ -5,7 +5,7 @@
                               runtime, i960 and trace sources
   gamecode/rxdk.project.json  the generated game code (i960, TGP, sound),
                               from the user's own ROM set: its own library,
-                              at -Os, so runtime and frontend changes never
+                              at -O2, so runtime and frontend changes never
                               recompile it
   libs/softfloat, libs/ymfm   the pinned dependencies scripts/setup.py
                               fetched into extern/
@@ -13,8 +13,10 @@
 Every project is built with the Dreamcast port's runtime definitions
 (platform/dreamcast/Makefile GAME_DEFS): its memory layout and its fast
 paths, M2_DC_SPEED, which compose the tile layers in 16-bit formats only
-when they change and need the i960 and TGP code rewritten by
-platform/dreamcast/scripts/fast_gen.py (run here, into <build>/xboxog-fast).
+when they change and need the i960 and TGP code either generated with
+scripts/recompile.py --fast_inaccuracy (--generated-as-is: build.py's
+default) or rewritten by platform/dreamcast/scripts/fast_gen.py (run here,
+into <build>/xboxog-fast).
 """
 from __future__ import annotations
 
@@ -55,6 +57,9 @@ def main() -> int:
     parser.add_argument("--set", default="daytona", choices=["daytona", "daytona93"])
     parser.add_argument("--build-dir", type=Path, help="the desktop build the game code was generated in "
                         "(default: build-daytona for daytona, build for daytona93)")
+    parser.add_argument("--generated-as-is", action="store_true",
+                        help="use the generated code as it is, without fast_gen.py: for code generated with "
+                             "scripts/recompile.py --fast_inaccuracy (the Vita's), which the runtime supports directly")
     args = parser.parse_args()
     build = (args.build_dir or ROOT / ("build-daytona" if args.set == "daytona" else "build")).resolve()
     defines = [f'M2_ROMSET="{args.set}"', "M2_DC_MEMORY", "M2_DC_SPIN_SKIP", "M2_DC_SPEED", "NDEBUG", "NOMINMAX"] + SOFTFLOAT_PUBLIC
@@ -85,14 +90,18 @@ def main() -> int:
     snd = build / "gen" / f"{args.set}_snd/snd_gen.cpp"
     if not any(gen.glob("*.cpp")) or not snd.exists():
         raise SystemExit(f"generate the game code first (scripts/setup.py): nothing in {gen}")
-    # The i960 code with fewer lockstep checks and the TGP code with its count
-    # in a local (fast_gen.py rewrites only the files whose output changes).
-    fast = build / "xboxog-fast"
-    fast_gen = ROOT / "platform/dreamcast/scripts/fast_gen.py"
-    for name in (args.set, f"{args.set}_tgp"):
-        if subprocess.run([sys.executable, str(fast_gen), str(build / "gen" / name), str(fast / name)]).returncode:
-            raise SystemExit(f"fast_gen.py failed on {build / 'gen' / name}")
-    code = sorted((fast / args.set).glob("*.cpp")) + [fast / f"{args.set}_tgp/tgp_gen.cpp", snd]
+    if args.generated_as_is:
+        code = sorted(gen.glob("*.cpp")) + [build / "gen" / f"{args.set}_tgp/tgp_gen.cpp", snd]
+    else:
+        # The i960 code with fewer lockstep checks and the TGP code with its
+        # count in a local (fast_gen.py rewrites only the files whose output
+        # changes).
+        fast = build / "xboxog-fast"
+        fast_gen = ROOT / "platform/dreamcast/scripts/fast_gen.py"
+        for name in (args.set, f"{args.set}_tgp"):
+            if subprocess.run([sys.executable, str(fast_gen), str(build / "gen" / name), str(fast / name)]).returncode:
+                raise SystemExit(f"fast_gen.py failed on {build / 'gen' / name}")
+        code = sorted((fast / args.set).glob("*.cpp")) + [fast / f"{args.set}_tgp/tgp_gen.cpp", snd]
     write(gamecode, {
         "name": "gamecode", "type": "library", "configuration": "release",
         "sources": [rel(p, gamecode) for p in code],

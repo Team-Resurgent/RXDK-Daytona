@@ -95,7 +95,10 @@ void TgpBoard::fifo_w(uint32_t data) {
 }
 
 void TgpBoard::run_tgp() {
-    if (booted_) tgpgen::run(tgp_, UINT64_MAX); // until it waits on an empty input FIFO
+    if (!booted_) return;
+    const uint64_t t0 = clock ? clock() : 0;
+    tgpgen::run(tgp_, UINT64_MAX); // until it waits on an empty input FIFO
+    if (clock) run_ticks += clock() - t0;
 }
 
 uint32_t TgpBoard::fifo_r() {

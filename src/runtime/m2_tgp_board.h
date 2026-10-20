@@ -28,6 +28,10 @@ public:
     TgpBoard(const TgpBoard &) = delete;
     TgpBoard &operator=(const TgpBoard &) = delete;
 #endif
+    // Optional profiling: with a clock set, the time the TGP's own code runs
+    // (in the clock's ticks), part of a frame's "core".
+    uint64_t (*clock)() = nullptr;
+    uint64_t run_ticks = 0;
 
     // i960 accesses (dword offsets within each range, MAME's handlers).
     void function_port_w(uint32_t offset, uint32_t data);  // 0x00880000
