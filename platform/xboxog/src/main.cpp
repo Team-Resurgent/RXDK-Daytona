@@ -36,7 +36,7 @@ constexpr const char *kEeprom = "T:\\ioboard_eeprom.bin";
 constexpr const char *kBackup = "T:\\backup_ram.bin";
 constexpr int kReport = 575; // frames between log lines (10 s)
 constexpr int kDrawEvery = 2;  // frames per picture: the board's geometry and tile layers only for those
-constexpr size_t kCachePages = 4096; // 16 MB of ROM pages (rom.h): of 48 MB of real ROM data
+constexpr size_t kCacheBlocks = 384; // 6 MB of unpacked ROM blocks (rom.h), of 48 MB packed into about 12
 
 void log(const char *format, ...) {
     char line[512];
@@ -101,8 +101,9 @@ void run() {
     XInitDevices(0, nullptr);
     log("Daytona: start, %u KB free\n", free_kb());
 
-    xbox::CachedRom rom(kData, kCachePages);
-    log("Daytona: ROM page cache %u KB; %u KB free\n", unsigned(rom.cache_bytes() / 1024), free_kb());
+    xbox::PackedRom rom(kData, kCacheBlocks);
+    log("Daytona: ROM %u KB packed, %u KB unpacked cache; %u KB free\n", unsigned(rom.packed_bytes() / 1024),
+        unsigned(rom.cache_bytes() / 1024), free_kb());
     // Texture RAM (tex0 then tex1, 2 MB each), as the Dreamcast frontend
     // supplies it.
     std::vector<uint8_t> texture_ram(0x400000, 0);
@@ -148,13 +149,16 @@ void run() {
     uint64_t frames = 0, presented = 0, skipped = 0, run_us = 0, draw_us = 0, sound_us = 0;
     // Where a frame's time goes (the runtime's profile): i960, TGP and
     // scheduling ("core"), geometry, and the tile layers ("video").
-    uint64_t core_us = 0, geometry_us = 0, video_us = 0;
+    uint64_t core_us = 0, geometry_us = 0, video_us = 0, worst_us = 0;
     game->set_profile_clock(now_us);
     // Draw mode, as the Dreamcast: the game runs every frame, its picture
     // (geometry and tile layers) is made and shown every kDrawEvery-th.
     game->set_frame_skip(kDrawEvery - 1);
+    // The slowest frame of each report, stage by stage (ms): which one stalls.
+    struct Spike { double total, core, geometry, video, sound, draw, rom_unpack; uint64_t frame; } worst = {};
     for (;;) {
-        const uint64_t t0 = now_us();
+        const uint64_t t0 = now_us(), unpack0 = rom.unpack_us;
+        uint64_t frame_draw_us = 0;
         game->run_frame(pad.sample());
         const rt::FrameProfile &profile = game->last_profile();
         core_us += profile.core();
@@ -179,24 +183,44 @@ void run() {
                 else display.draw_screen(game->board().video());
                 display.present();
                 ++presented;
-                draw_us += now_us() - t1;
+                frame_draw_us = now_us() - t1;
+                draw_us += frame_draw_us;
             }
+        }
+        // The slowest frame of the report (game, sound and its picture): a
+        // stall shows here before it shows in the averages.
+        const uint64_t frame_total = now_us() - t0;
+        if (frame_total > worst_us) {
+            worst_us = frame_total;
+            worst = {frame_total / 1000.0, profile.core() / 1000.0, profile.geometry / 1000.0, profile.video / 1000.0,
+                     (t1 - ts) / 1000.0, frame_draw_us / 1000.0, (rom.unpack_us - unpack0) / 1000.0, frames};
         }
         const double ahead = due - double(now_us() - start);
         if (ahead > 1500) Sleep(DWORD(ahead / 1000));
         if (frames % kReport == 0) {
             log("Daytona: frame %llu, %.1f s; presented %llu skipped %llu; ms/frame run %.1f draw %.1f; "
-                "ROM misses %llu (%.0f ms reading); sound underruns %llu; polygons %u textured %u materials %u (%u KB) hd %u dumped %u; %u KB free\n",
+                "ROM blocks unpacked %llu (%.0f ms); sound underruns %llu; polygons %u textured %u materials %u (%u KB) hd %u dumped %u; %u KB free\n",
                 (unsigned long long)frames, double(now_us() - start) / 1e6, (unsigned long long)presented,
                 (unsigned long long)skipped, run_us / 1000.0 / kReport, presented ? draw_us / 1000.0 / kReport : 0.0,
-                (unsigned long long)rom.misses, rom.read_us / 1000.0, (unsigned long long)audio.underruns, renderer ? renderer->drawn : 0u, renderer ? renderer->textured : 0u,
+                (unsigned long long)rom.misses, rom.unpack_us / 1000.0, (unsigned long long)audio.underruns, renderer ? renderer->drawn : 0u, renderer ? renderer->textured : 0u,
                 renderer ? unsigned(renderer->materials()) : 0u,
                 renderer ? unsigned(renderer->texture_bytes() / 1024) : 0u, renderer ? renderer->hd_loaded : 0u,
                 hd.dumps, free_kb());
-            log("Daytona: profile ms/frame: core %.1f geometry %.1f video %.1f sound %.1f; draw %.1f per shown frame\n",
+            log("Daytona: profile ms/frame: core %.1f geometry %.1f video %.1f sound %.1f; draw %.1f per shown frame; "
+                "worst frame %.1f\n",
                 core_us / 1000.0 / kReport, geometry_us / 1000.0 / kReport, video_us / 1000.0 / kReport,
-                sound_us / 1000.0 / kReport, presented ? draw_us / 1000.0 / double(presented) : 0.0);
-            run_us = draw_us = sound_us = core_us = geometry_us = video_us = 0;
+                sound_us / 1000.0 / kReport, presented ? draw_us / 1000.0 / double(presented) : 0.0, worst_us / 1000.0);
+            log("Daytona: worst frame %llu: %.1f ms = core %.1f (of it ROM unpacking %.1f) geometry %.1f video %.1f "
+                "sound %.1f draw %.1f\n",
+                (unsigned long long)worst.frame, worst.total, worst.core, worst.rom_unpack, worst.geometry, worst.video,
+                worst.sound, worst.draw);
+            worst = {};
+            if (renderer)
+                log("Daytona: textures since start: sources read %u (%u changed), built %u, waited %u, evictions %u; "
+                    "%u palettes\n",
+                    renderer->source_reads, renderer->rebuilt_sources, renderer->built, renderer->deferred,
+                    renderer->evictions, unsigned(renderer->palettes()));
+            run_us = draw_us = sound_us = core_us = geometry_us = video_us = worst_us = 0;
             presented = skipped = 0;
             if (game->board().io().eeprom_dirty) {
                 save(*game);

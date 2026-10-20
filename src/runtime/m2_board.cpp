@@ -246,6 +246,7 @@ void M2Board::vblank_end() {
     m.tex1 = reinterpret_cast<const uint32_t *>(tex1_.data());
 #endif
     m.tex_generation = tex_generation_;
+    m.tex_rows = tex_rows_.data();
     video_->screen_update(geo_->polys, geo_->windows(), m);
     ++frame_;
 }
@@ -428,6 +429,9 @@ void M2Board::tex_write(const Page &p, uint32_t addr, uint32_t lane_data) {
     w[0] = uint8_t(lane_data);
     w[1] = uint8_t(lane_data >> 8);
     ++tex_generation_; // the hardware renderer re-uploads texture RAM when this moves
+    // The sheet (0x12000000 or 0x12400000) and the cell row written: cell o
+    // is read_texel_quad's offset, its row o >> 9.
+    tex_rows_[((addr >> 22) & 1) * 2048 + ((o >> 9) & 2047)] = uint32_t(tex_generation_);
 }
 
 // --- bus ---------------------------------------------------------------------

@@ -179,6 +179,7 @@ private:
     Cpu *cpu_ = nullptr;
     int frame_skip_ = 0;
     uint64_t tex_generation_ = 0; // texture RAM writes so far
+    std::vector<uint32_t> tex_rows_ = std::vector<uint32_t>(2 * 2048); // VideoMem::tex_rows
     Lockstep *ls_ = nullptr;
 
     uint32_t intreq_ = 0, intena_ = 0;

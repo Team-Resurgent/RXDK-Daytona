@@ -189,7 +189,11 @@ def package(romset: str, root: Path) -> None:
     dist = HERE / "dist"
     folder = dist / TITLE
     shutil.rmtree(folder, ignore_errors=True)
-    shutil.copytree(built, folder)
+    # The title and the data as staged now: RXDK's own staging folder keeps
+    # whatever an earlier layout of data/ left there.
+    folder.mkdir(parents=True)
+    shutil.copyfile(built / "default.xbe", folder / "default.xbe")
+    shutil.copytree(HERE / "game/data", folder / "data")
     iso = dist / f"{TITLE}.iso"
     xdvdfs = root / "tools/xdvdfs.exe"
     if xdvdfs.exists():

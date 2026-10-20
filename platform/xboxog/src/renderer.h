@@ -11,18 +11,22 @@
 // and the shading approximation: descending window, ascending z, newest
 // first on ties, drawn back to front with no depth test; a textured polygon
 // is its texture's luma as greys (luma RAM at the material's luma base)
-// times its colour at full light scaled by its light. With no palette banks
-// to run out of, every material is a real texture here: swizzled A8R8G8B8,
-// transparent texel 15 with alpha 0 for the alpha test.
+// times its colour at full light scaled by its light. As on the Dreamcast,
+// the texels are palette indices: a source (the 4-bit texel indices of one
+// texture-sheet rectangle) is one swizzled P8 texture, and its greys a
+// 32-entry palette shared by every texture with the same 16 luma values
+// (transparent texel 15 with alpha 0 for the alpha test). The NV2A has no
+// palette banks to run out of, so the lighting variants of a texture cost a
+// palette each, not a texture each.
 //
-// Textures are cached by content, not by where they sit in texture RAM: a
-// source is the 4-bit texel indices of one texture-sheet rectangle, checked
-// again whenever the game writes texture RAM (VideoMem::tex_generation), and
-// a material is a source with its 16 luma values. A material's key (64-bit,
-// hex) names its HD replacement (hd.h): D:\hd\<key>.dds (drawn as the greys
-// are, times the polygon's colour) or <key>_c.dds (a full-colour texture,
-// times the light alone); with dumping on, each new material is written to
-// T:\dump\<key>.tga at its source size.
+// Sources are cached by content, not by where they sit in texture RAM, and
+// read again only when the game writes one of their rows (VideoMem::tex_rows).
+// A material is a source with its 16 luma values: its key (64-bit, hex) names
+// its HD replacement (hd.h): D:\hd\<key>.dds (drawn as the greys are, times
+// the polygon's colour) or <key>_c.dds (a full-colour texture, times the
+// light alone); with dumping on, each new material is written to
+// T:\dump\<key>.tga at its source size. A texture let go (changed, evicted)
+// is released two frames later, when the GPU is done with it.
 #pragma once
 
 #ifndef M2_DC_SPEED
@@ -79,14 +83,12 @@ public:
         if (scrolled) update_scroll(video);
         const auto &polys = video.gpu_polys();
         const rt::VideoMem &mem = video.gpu_mem();
-        if (mem.tex_generation != tex_generation_) { // the game wrote texture RAM: check sources again
-            tex_generation_ = mem.tex_generation;
-            ++source_epoch_;
-        }
+        bury();
         if (texture_bytes_ > kBudget) evict();
         sort(polys);
         ++colour_stamp_;
         builds_ = 0;
+        build_deadline_ = clock() + kBuildTicks;
 
         if (scrolled) {
             scroll_quads(video.scroll_x(), video.scroll_y());
@@ -133,26 +135,43 @@ public:
     // The last frame: polygons drawn (of them textured); the cache.
     unsigned drawn = 0, textured = 0;
     size_t materials() const { return materials_.size(); }
+    size_t palettes() const { return palettes_.size(); }
     size_t texture_bytes() const { return texture_bytes_; }
     unsigned evictions = 0, rebuilt_sources = 0, hd_loaded = 0;
+    // Since the start: sources read (texel decodes), source textures built,
+    // and textures that waited a frame for the build budget.
+    unsigned source_reads = 0, built = 0, deferred = 0;
 
 private:
     static constexpr int kW = rt::Video::W, kH = rt::Video::H;
     static constexpr float kScale = 480.0f / kH, kOffsetX = (640.0f - kW * kScale) * 0.5f;
     static constexpr uint32_t kTextureLimit = 256;     // source textures at most this a side
-    static constexpr unsigned kBuildsPerFrame = 48;    // new materials a frame
     static constexpr uint32_t kPaletteLuma = 0xf0;     // the light the greys are shaded at (luma & 0xf0 at most)
-    static constexpr size_t kBudget = 4u << 20;        // texture memory before unused materials go
+    static constexpr size_t kBudget = 4u << 20;        // source textures before the least recently used go
     static constexpr size_t kBatchVertices = 3 * 1024; // vertices in one DrawPrimitiveUP
+    // Source textures made again a frame (their texels changed): as many as
+    // fit in 4 ms, at most 256; the rest are drawn with what they had before
+    // and wait a frame. New ones are always made (texture_for).
+    static constexpr uint64_t kBuildMicroseconds = 4000;
+    static constexpr unsigned kBuildsPerFrame = 256;
 
     struct Source {
-        uint32_t w = 0, h = 0, source_w = 0, source_h = 0;
-        uint64_t hash = 0, epoch = 0;
-        std::vector<uint8_t> texels; // w x h indices 0..15
+        uint32_t w = 0, h = 0, source_w = 0, source_h = 0, bx = 0, by = 0, sheet = 0;
+        uint64_t hash = 0;
+        uint32_t checked = 0;        // VideoMem::tex_generation (truncated) when last read or checked
+        bool valid = false;          // read at least once (hash, size and place known)
+        // w x h indices 0..15: only until the texture is made from them (the
+        // texture holds them then; keeping both doubled the memory).
+        std::vector<uint8_t> texels;
+        IDirect3DTexture8 *texture = nullptr; // P8, made from texels of hash `built`
+        uint64_t built = 0, used = 0;
     };
+    // How a polygon is textured: a source's texture and a palette, or an HD
+    // replacement (no palette). Cheap: one per content, greys and mirroring.
     struct Material {
         IDirect3DTexture8 *texture = nullptr;
-        size_t bytes = 0;
+        IDirect3DPalette8 *palette = nullptr;
+        size_t hd_bytes = 0; // an HD replacement's own texture (the material owns it)
         float u_scale = 0, v_scale = 0;
         DWORD address_u = D3DTADDRESS_WRAP, address_v = D3DTADDRESS_WRAP;
         bool colour_texture = false; // an HD replacement in full colour: times the light only
@@ -287,30 +306,123 @@ private:
     uint32_t colour_stamp_ = 1;
 
     // The source a polygon samples: its sheet rectangle's texel indices,
-    // read again when texture RAM has changed since they were.
+    // read again only when the game has written one of its rows since.
     Source &source_for(const rt::GeoPoly &poly, const rt::VideoMem &mem) {
         const uint32_t key = uint32_t(poly.texheader[0] & 0x23ff) | uint32_t(poly.texheader[2] & 0x1fff) << 16;
         Source &s = sources_[key];
-        if (s.epoch == source_epoch_ && !s.texels.empty()) return s;
+        s.used = frame_;
+        const uint32_t generation = uint32_t(mem.tex_generation);
+        if (s.valid) {
+            if (s.checked == generation) return s;
+            if (!written_since(s, mem)) {
+                s.checked = generation;
+                return s;
+            }
+        }
         s.source_w = 32u << (poly.texheader[0] & 7);
         s.source_h = 32u << ((poly.texheader[0] >> 3) & 7);
         const uint32_t step_x = std::max(1u, s.source_w / kTextureLimit), step_y = std::max(1u, s.source_h / kTextureLimit);
         s.w = s.source_w / step_x;
         s.h = s.source_h / step_y;
-        const uint32_t bx = 32u * (poly.texheader[2] & 0x3f);
-        const uint32_t by = 32u * ((poly.texheader[2] >> 6) & 0x1f);
-        const uint32_t *sheet = (poly.texheader[2] & 0x1000) ? mem.tex1 : mem.tex0;
-        s.texels.resize(size_t(s.w) * s.h);
-        for (uint32_t y = 0; y < s.h; ++y)
-            for (uint32_t x = 0; x < s.w; ++x)
-                s.texels[size_t(y) * s.w + x] =
-                    uint8_t(rt::read_texel_quad(bx, by, x * step_x, x * step_x, y * step_y, y * step_y, sheet).t00 >> 4);
+        s.bx = 32u * (poly.texheader[2] & 0x3f);
+        s.by = 32u * ((poly.texheader[2] >> 6) & 0x1f);
+        s.sheet = (poly.texheader[2] & 0x1000) ? 1 : 0;
+        read_texels(s, mem, s.texels);
         const uint64_t hash =
             fnv(0xcbf29ce484222325ull ^ (uint64_t(s.source_w) << 32 | s.source_h), s.texels.data(), s.texels.size());
-        if (s.epoch && hash != s.hash) ++rebuilt_sources;
+        if (s.valid && hash != s.hash) ++rebuilt_sources;
+        ++source_reads;
         s.hash = hash;
-        s.epoch = source_epoch_;
+        s.checked = generation;
+        s.valid = true;
+        if (s.texture && s.built == hash) release(s.texels); // (written, but the same texels)
         return s;
+    }
+
+    // The source's texel indices, at most kTextureLimit a side (larger ones
+    // sampled down), from texture RAM as it is now.
+    static void read_texels(const Source &s, const rt::VideoMem &mem, std::vector<uint8_t> &out) {
+        const uint32_t *sheet = s.sheet ? mem.tex1 : mem.tex0;
+        const uint32_t step_x = s.source_w / s.w, step_y = s.source_h / s.h;
+        out.resize(size_t(s.w) * s.h);
+        if (step_x == 1 && step_y == 1) {
+            decode(s, sheet, out.data());
+            return;
+        }
+        for (uint32_t y = 0; y < s.h; ++y)
+            for (uint32_t x = 0; x < s.w; ++x)
+                out[size_t(y) * s.w + x] = uint8_t(
+                    rt::read_texel_quad(s.bx, s.by, x * step_x, x * step_x, y * step_y, y * step_y, sheet).t00 >> 4);
+    }
+    static void release(std::vector<uint8_t> &bytes) { std::vector<uint8_t>().swap(bytes); }
+
+    // A whole source at its own size, a 16-bit cell (2 x 2 texels) at a
+    // time: read_texel_quad's layout (cell row (y >> 1), flipped by 512 for
+    // columns past the 1024 fold; the nibble by the texel's parity, which is
+    // the sheet's as sources start on multiples of 32), without its per-texel
+    // call. The same texels as read_texel_quad's t00, one by one.
+    static void decode(const Source &s, const uint32_t *sheet, uint8_t *texels) {
+        for (uint32_t y = 0; y < s.h; y += 2) {
+            uint8_t *even = texels + size_t(y) * s.w, *odd = even + s.w;
+            for (uint32_t x = 0; x < s.w; x += 2) {
+                uint32_t sx = s.bx + x, row = (s.by + y) >> 1;
+                if (sx >= 1024) {
+                    sx -= 1024;
+                    row ^= 512;
+                }
+                const uint32_t off = (row << 9) + (sx >> 1);
+                const uint32_t cell = sheet[(off >> 1) & 0x7ffff] >> ((off & 1) << 4);
+                even[x] = uint8_t((cell >> 12) & 15);
+                even[x + 1] = uint8_t((cell >> 8) & 15);
+                odd[x] = uint8_t((cell >> 4) & 15);
+                odd[x + 1] = uint8_t(cell & 15);
+            }
+        }
+    }
+
+    // Whether the game wrote any of the source's rows of 16-bit cells
+    // (VideoMem::tex_rows) after it was last checked. A cell row holds two
+    // texel rows; columns from 1024 on are on the row with bit 9 flipped
+    // (read_texel_quad's fold).
+    static bool written_since(const Source &s, const rt::VideoMem &mem) {
+        if (!mem.tex_rows) return true;
+        const uint32_t *rows = mem.tex_rows + s.sheet * 2048;
+        const bool low = s.bx < 1024, high = s.bx + s.source_w > 1024;
+        for (uint32_t y = s.by; y < s.by + s.source_h; y += 2) {
+            const uint32_t r = (y >> 1) & 2047;
+            if (low && int32_t(rows[r] - s.checked) > 0) return true;
+            if (high && int32_t(rows[r ^ 512] - s.checked) > 0) return true;
+        }
+        return false;
+    }
+
+    // The source's P8 texture, made again when its texels changed. A new one
+    // is always made (cheap now: no texture yet means a polygon drawn flat,
+    // a white flash); a changed one only within the frame's build budget,
+    // past which the texture it had stays a frame longer.
+    bool texture_for(Source &s) {
+        if (s.texture && s.built == s.hash) return true;
+        if (s.texture && (builds_ >= kBuildsPerFrame || clock() > build_deadline_)) {
+            ++deferred;
+            return true;
+        }
+        IDirect3DTexture8 *texture = nullptr;
+        if (FAILED(device_->CreateTexture(s.w, s.h, 1, 0, D3DFMT_P8, 0, &texture))) return s.texture != nullptr;
+        D3DLOCKED_RECT locked;
+        if (FAILED(texture->LockRect(0, &locked, nullptr, 0))) {
+            texture->Release();
+            return s.texture != nullptr;
+        }
+        XGSwizzleRect(s.texels.data(), s.w, nullptr, locked.pBits, s.w, s.h, nullptr, 1);
+        texture->UnlockRect(0);
+        release(s.texels);
+        retire(s);
+        s.texture = texture;
+        s.built = s.hash;
+        texture_bytes_ += size_t(s.w) * s.h;
+        ++builds_;
+        ++built;
+        return true;
     }
 
     // A texel's grey: its luma (luma RAM at the material's luma base, at
@@ -326,67 +438,118 @@ private:
         }
     }
 
+    // The palette of these greys, shared by every texture lit the same way.
+    IDirect3DPalette8 *palette_for(uint64_t key, const uint32_t greys[16]) {
+        auto found = palettes_.find(key);
+        if (found != palettes_.end()) return found->second;
+        IDirect3DPalette8 *palette = nullptr;
+        if (FAILED(device_->CreatePalette(D3DPALETTE_32, &palette))) return nullptr;
+        D3DCOLOR *colours = nullptr;
+        if (FAILED(palette->Lock(&colours, 0))) {
+            palette->Release();
+            return nullptr;
+        }
+        for (unsigned i = 0; i < 32; ++i) colours[i] = i < 16 ? greys[i] : 0;
+        palette->Unlock();
+        palettes_.emplace(key, palette);
+        return palette;
+    }
+
     Material *material_for(const rt::GeoPoly &poly, const rt::VideoMem &mem) {
         Source &source = source_for(poly, mem);
-        uint32_t palette[16];
+        uint32_t palette_colours[16];
         uint8_t lumas[16];
-        greys(poly, mem, palette, lumas);
+        greys(poly, mem, palette_colours, lumas);
         const uint8_t transparent = (poly.texheader[0] >> 13) & 1;
-        const uint64_t key = fnv(fnv(source.hash, lumas, 16), &transparent, 1);
+        const uint64_t look = fnv(fnv(0xcbf29ce484222325ull, lumas, 16), &transparent, 1);
+        const uint64_t key = fnv(fnv(source.hash, lumas, 16), &transparent, 1); // the HD name
         // The addressing is the polygon's (mirror bits), not the texture's.
         const uint64_t slot_key = key ^ (uint64_t((poly.texheader[0] >> 8) & 3) << 62);
         auto found = materials_.find(slot_key);
-        if (found != materials_.end()) {
-            found->second.used = frame_;
-            return &found->second;
-        }
-        if (builds_ >= kBuildsPerFrame) return nullptr;
-        ++builds_;
-        Material m;
-        m.u_scale = 1.0f / (8.0f * float(source.source_w));
-        m.v_scale = 1.0f / (8.0f * float(source.source_h));
-        m.address_u = ((poly.texheader[0] >> 8) & 1) ? D3DTADDRESS_MIRROR : D3DTADDRESS_WRAP;
-        m.address_v = ((poly.texheader[0] >> 9) & 1) ? D3DTADDRESS_MIRROR : D3DTADDRESS_WRAP;
-        m.used = frame_;
-        if (HdTextures::Loaded hd = hd_.load(device_, key); hd.texture) {
-            m.texture = hd.texture;
-            m.bytes = hd.bytes;
-            m.colour_texture = hd.colour;
-            ++hd_loaded;
-        } else {
-            pixels_.resize(size_t(source.w) * source.h);
-            for (size_t i = 0; i < pixels_.size(); ++i) pixels_[i] = palette[source.texels[i]];
-            if (hd_.dumping()) hd_.dump(key, pixels_.data(), source.w, source.h);
-            if (FAILED(device_->CreateTexture(source.w, source.h, 1, 0, D3DFMT_A8R8G8B8, 0, &m.texture))) return nullptr;
-            D3DLOCKED_RECT locked;
-            if (FAILED(m.texture->LockRect(0, &locked, nullptr, 0))) {
-                m.texture->Release();
-                return nullptr;
+        if (found == materials_.end()) {
+            Material m;
+            m.u_scale = 1.0f / (8.0f * float(source.source_w));
+            m.v_scale = 1.0f / (8.0f * float(source.source_h));
+            m.address_u = ((poly.texheader[0] >> 8) & 1) ? D3DTADDRESS_MIRROR : D3DTADDRESS_WRAP;
+            m.address_v = ((poly.texheader[0] >> 9) & 1) ? D3DTADDRESS_MIRROR : D3DTADDRESS_WRAP;
+            if (HdTextures::Loaded hd = hd_.load(device_, key); hd.texture) {
+                m.texture = hd.texture;
+                m.hd_bytes = hd.bytes;
+                m.colour_texture = hd.colour;
+                texture_bytes_ += hd.bytes;
+                ++hd_loaded;
+            } else if (hd_.wants_dump(key)) {
+                // (The source's texels may be gone into its texture: read again.)
+                read_texels(source, mem, scratch_);
+                argb_.resize(scratch_.size());
+                for (size_t i = 0; i < argb_.size(); ++i) argb_[i] = palette_colours[scratch_[i]];
+                hd_.dump(key, argb_.data(), source.w, source.h);
             }
-            XGSwizzleRect(pixels_.data(), source.w * 4, nullptr, locked.pBits, source.w, source.h, nullptr, 4);
-            m.texture->UnlockRect(0);
-            m.bytes = size_t(source.w) * source.h * 4;
+            found = materials_.emplace(slot_key, m).first;
         }
-        texture_bytes_ += m.bytes;
-        return &materials_.emplace(slot_key, m).first->second;
+        Material &m = found->second;
+        m.used = frame_;
+        if (m.hd_bytes) return &m;
+        // The source's texture now (it may have been made again since).
+        if (!texture_for(source)) return nullptr;
+        m.texture = source.texture;
+        m.palette = palette_for(look, palette_colours);
+        return m.palette ? &m : nullptr;
     }
 
-    // Over budget: let the GPU finish with them, then drop the materials not
-    // drawn for a second (or, still over, every one; they build again).
+    // Over budget: let go of the least recently drawn source textures (never
+    // one drawn in the last two frames) until a quarter of the budget is free;
+    // they are made again when drawn. Materials not drawn for a minute go too.
     void evict() {
-        device_->BlockUntilIdle();
-        for (int pass = 0; pass < 2 && texture_bytes_ > kBudget / 2; ++pass) {
-            for (auto it = materials_.begin(); it != materials_.end();) {
-                if (pass == 1 || frame_ - it->second.used > 60) {
-                    texture_bytes_ -= it->second.bytes;
-                    it->second.texture->Release();
-                    it = materials_.erase(it);
-                } else {
-                    ++it;
+        std::vector<std::pair<uint64_t, uint32_t>> by_age; // (last drawn, key)
+        for (const auto &[key, source] : sources_)
+            if (source.texture && frame_ - source.used > 2) by_age.emplace_back(source.used, key);
+        std::sort(by_age.begin(), by_age.end());
+        for (const auto &[used, key] : by_age) {
+            if (texture_bytes_ <= kBudget / 4 * 3) break;
+            auto it = sources_.find(key);
+            retire(it->second);
+            sources_.erase(it);
+        }
+        for (auto it = materials_.begin(); it != materials_.end();) {
+            if (frame_ - it->second.used > 1800) {
+                if (it->second.hd_bytes) {
+                    texture_bytes_ -= it->second.hd_bytes;
+                    graveyard_.emplace_back(frame_, it->second.texture);
                 }
+                it = materials_.erase(it);
+            } else {
+                ++it;
             }
         }
         ++evictions;
+    }
+
+    // A source's texture to the graveyard: released once the GPU is past it.
+    void retire(Source &s) {
+        if (!s.texture) return;
+        texture_bytes_ -= size_t(s.w) * s.h;
+        graveyard_.emplace_back(frame_, s.texture);
+        s.texture = nullptr;
+    }
+    void bury() {
+        size_t kept = 0;
+        for (auto &[frame, texture] : graveyard_) {
+            if (frame_ - frame >= 3) texture->Release();
+            else graveyard_[kept++] = {frame, texture};
+        }
+        graveyard_.resize(kept);
+    }
+
+    static uint64_t clock() {
+        LARGE_INTEGER count;
+        QueryPerformanceCounter(&count);
+        return uint64_t(count.QuadPart);
+    }
+    static uint64_t ticks(uint64_t microseconds) {
+        LARGE_INTEGER frequency;
+        QueryPerformanceFrequency(&frequency);
+        return uint64_t(frequency.QuadPart) * microseconds / 1000000;
     }
 
     void polygon_state() {
@@ -408,6 +571,7 @@ private:
         current_ = material;
         if (material) {
             device_->SetTexture(0, material->texture);
+            if (material->palette) device_->SetPalette(0, material->palette);
             device_->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
             device_->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
             device_->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
@@ -463,15 +627,19 @@ private:
     IDirect3DTexture8 *background_ = nullptr, *background_over_ = nullptr, *foreground_ = nullptr, *scroll_ = nullptr;
     uint64_t back_uploaded_ = ~0ull, front_uploaded_ = ~0ull;
     bool back_scrolled_ = false;
-    uint64_t frame_ = 0, tex_generation_ = ~0ull, source_epoch_ = 1;
+    uint64_t frame_ = 0, build_deadline_ = 0;
+    const uint64_t kBuildTicks = ticks(kBuildMicroseconds);
     unsigned builds_ = 0;
     size_t texture_bytes_ = 0;
     Material *current_ = nullptr;
     std::vector<Entry> order_, order_tmp_;
     std::vector<Vertex> vertices_;
-    std::vector<uint32_t> pixels_;
+    std::vector<uint32_t> argb_;
+    std::vector<uint8_t> scratch_;
     std::unordered_map<uint32_t, Source> sources_;
     std::unordered_map<uint64_t, Material> materials_;
+    std::unordered_map<uint64_t, IDirect3DPalette8 *> palettes_; // by luma values and transparency
+    std::vector<std::pair<uint64_t, IDirect3DTexture8 *>> graveyard_; // (frame let go, texture)
     uint8_t gamma_[256] = {};
 };
 

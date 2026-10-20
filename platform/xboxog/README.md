@@ -73,7 +73,7 @@ replacement, lit but not tinted.
 - `scripts/setup.py` and `scripts/recompile.py` (the desktop's): the ROM
   import, which checks every file, and the game code generated from it.
 - `stage_data.py`: the imported images into `game/data` (`D:\data` on the
-  Xbox), the ROM regions cut after their last nonzero page.
+  Xbox, about 21 MB), the ROM regions packed (`<name>.z`).
 - `gen_project.py`: the RXDK projects. The title (`src/`, the runtime) and,
   as libraries, the generated game code (at `-Os`, rewritten first by the
   Dreamcast's `fast_gen.py`), SoftFloat and ymfm. Everything is built with
@@ -84,12 +84,15 @@ replacement, lit but not tinted.
 
 The frontend, in `src/`:
 
-- `rom.h`: the 48 MB of ROM regions read from `D:\data` a page at a time
-  into a 16 MB cache.
+- `rom.h`: the 48 MB of ROM regions, packed by `stage_data.py` into about
+  12 MB of independently deflated 16 KB blocks, all loaded at the start; a
+  block is unpacked (`inflate.h`) into a 6 MB cache when the game first
+  reads it, so nothing is read from the disc during play.
 - `renderer.h`: the 16-bit tile layers (the race's scenery as a scrolled
   layer) and the polygons through Direct3D 8, a port of the Dreamcast's
-  PVR renderer, with textures cached by content (`hd.h`: the replacements
-  and dumps).
+  PVR renderer: each texture once, as a palettized (P8) texture made again
+  only when the game rewrites its rows, its lighting as shared 32-entry
+  palettes (`hd.h`: the replacements and dumps).
 - `audio.h`: the native sound sequencer into DirectSound.
 - `input.h`: the controller as the cabinet.
 - `main.cpp`: the loop, paced to the board's 57.52 Hz, a picture every

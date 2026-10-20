@@ -47,6 +47,8 @@ public:
 
     size_t available() const { return index_.size(); }
     bool dumping() const { return dumping_; }
+    // Whether dump() would write this one (dumping on, not written yet).
+    bool wants_dump(uint64_t key) const { return dumping_ && !dumped_.count(key); }
 
     Loaded load(IDirect3DDevice8 *device, uint64_t key) {
         auto found = index_.find(key);

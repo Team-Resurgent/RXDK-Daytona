@@ -32,6 +32,11 @@ struct VideoMem {
     const uint32_t *tex0 = nullptr;     // texture RAM 0, packed as MAME stores it (0x80000 dwords)
     const uint32_t *tex1 = nullptr;     // texture RAM 1
     uint64_t tex_generation = 0;        // counts writes to texture RAM (changes when either sheet does)
+    // Optional (null if the board does not keep it): per sheet, 2048 rows of
+    // 16-bit cells (two texel rows each, as read_texel_quad's offset >> 9),
+    // tex_generation, truncated, as of that row's last write. A hardware
+    // renderer re-reads only the textures whose rows moved.
+    const uint32_t *tex_rows = nullptr;
 };
 
 class Raster {
