@@ -1,0 +1,6 @@
+{
+    "git.ignoredRepositories": [
+        "extern/mame",
+        "extern/kos-dc"
+    ]
+}

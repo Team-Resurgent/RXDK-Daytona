@@ -1,0 +1,54 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.boucydesigns.daytona'
+    compileSdk 36
+    ndkVersion '28.2.13676358'
+
+    defaultConfig {
+        applicationId 'com.boucydesigns.daytona'
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName '0.1'
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DCMAKE_BUILD_TYPE=Release',
+                          "-DM2_GEN_ROOT=${rootProject.projectDir}/../../../build/gen"
+                targets   'daytona'
+                cppFlags '-std=c++20'
+            }
+        }
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    sourceSets {
+        main {
+            // SDLActivity and its helper classes come from the pinned SDL source
+            // fetched by scripts/setup.py.
+            java.srcDirs = [
+                'src/main/java',
+                '../../../../extern/sdl3/android-project/app/src/main/java'
+            ]
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('../../../../CMakeLists.txt')
+            version '3.31.6'
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+}

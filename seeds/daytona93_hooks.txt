@@ -1,0 +1,11 @@
+# daytona93: enhancement hooks (m2recomp --hooks). "ADDRESS name": the
+# recompiled code calls rt::hook_<name>(c) just before the instruction at
+# ADDRESS. Addresses only, our own analysis (rules.md rule 7); see
+# src/runtime/enhance.h. Each hook does nothing while its option is off.
+#
+# 0x16f74..0x17070 builds the list of course cells to draw (count 0x5016c0,
+# cells from 0x5016c1) from the 5x5 cells around the car's: offsets
+# dx + 16 dy (table 0x17136), slot order nearest first (0x17104, 0x1711d on
+# two courses), kept where two visibility masks (r13 from 0x171f8, r9 from
+# 0x1727c) allow. 0x17828 then draws every object of every listed cell.
+00017078 draw_list

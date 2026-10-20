@@ -1,0 +1,24 @@
+# Revision A's factory settings are a linked twin cabinet; this sets a single
+# one in test mode: GAME SYSTEM > LINK ID SINGLE, CABINET UPLIGHT, then exit.
+# (RED vr1 cursor down, GREEN vr4 cursor up, YELLOW vr3 value up, START select.)
+frames 3600
+600-609 test=1
+700-709 vr1=1
+760-769 vr1=1
+820-829 start=1
+900-909 vr1=1
+1000-1009 vr3=1
+1100-1109 vr3=1
+1200-1209 vr1=1
+1260-1269 vr1=1
+1340-1349 vr3=1
+1440-1449 vr1=1
+1500-1509 vr1=1
+1560-1569 vr1=1
+1620-1629 vr1=1
+1680-1689 vr1=1
+1740-1749 vr1=1
+1820-1829 start=1
+1900-1909 vr4=1
+1960-1969 vr4=1
+2020-2029 start=1

@@ -1,0 +1,291 @@
+diff --git a/src/devices/cpu/mb86233/mb86233.cpp b/src/devices/cpu/mb86233/mb86233.cpp
+index 2e483756a3..26fb932ace 100644
+--- a/src/devices/cpu/mb86233/mb86233.cpp
++++ b/src/devices/cpu/mb86233/mb86233.cpp
+@@ -1221,6 +1221,22 @@ void mb86233_device::execute_run()
+ 		}
+ 
+ 	rep_start:
++		// daytona-arcade-recomp: $M2TRACE_TGPPC logs each completed
++		// instruction (up to $M2TRACE_TGPPC_MAX, default 2M): ppc a b d p st.
++		{
++			static FILE *pcl = nullptr;
++			static bool tried = false;
++			static unsigned long long n = 0, nmax = 2000000;
++			if (!tried) {
++				tried = true;
++				if (const char *p = getenv("M2TRACE_TGPPC")) pcl = fopen(p, "w");
++				if (const char *m = getenv("M2TRACE_TGPPC_MAX")) nmax = strtoull(m, nullptr, 0);
++			}
++			if (pcl && n < nmax) {
++				n++;
++				fprintf(pcl, "%x %x %x %x %x %x\n", m_ppc, m_a, m_b, m_d, m_p, m_st);
++			}
++		}
+ 		if(0) {
+ 		do_stall:
+ 			m_pc = m_ppc;
+diff --git a/src/mame/sega/model2.cpp b/src/mame/sega/model2.cpp
+index f7dc50647a..5022cb3236 100644
+--- a/src/mame/sega/model2.cpp
++++ b/src/mame/sega/model2.cpp
+@@ -96,6 +96,38 @@
+ #include "model1io2.lh"
+ #include "segabill.lh"
+ 
++// daytona-arcade-recomp: TGP-side log for the static recompiler's oracle.
++// $M2TRACE_TGPLOG gets one line per TGP-visible event, in order:
++//   up N w0 w1 ...  program uploaded (N words, hex), TGP boots
++//   in V            TGP popped V from the input FIFO
++//   out V           TGP pushed V to the output FIFO
++//   bank V          TGP wrote its bank register
++//   mr A V          TGP read banked external memory (A = io offset)
++//   mw A V M        TGP wrote banked external memory (M = mem_mask)
++FILE *m2_geo_log()
++{
++	static FILE *f = nullptr;
++	static bool tried = false;
++	if (!tried) {
++		tried = true;
++		if (const char *p = getenv("M2TRACE_GEOLOG"))
++			f = fopen(p, "w");
++	}
++	return f;
++}
++
++static FILE *m2_tgp_log()
++{
++	static FILE *f = nullptr;
++	static bool tried = false;
++	if (!tried) {
++		tried = true;
++		if (const char *p = getenv("M2TRACE_TGPLOG"))
++			f = fopen(p, "w");
++	}
++	return f;
++}
++
+ /* Timers - these count down at 25 MHz and pull IRQ2 when they hit 0 */
+ u32 model2_state::timers_r(offs_t offset)
+ {
+@@ -474,31 +506,42 @@ void model2_tgp_state::copro_tgp_io_map(address_map &map)
+ void model2_tgp_state::copro_tgp_rf_map(address_map &map)
+ {
+ 	map(0x0, 0x0).nopw(); // leds? busy flag?
+-	map(0x1, 0x1).r(m_copro_fifo_in, FUNC(generic_fifo_u32_device::read));
+-	map(0x2, 0x2).w(m_copro_fifo_out, FUNC(generic_fifo_u32_device::write));
++	map(0x1, 0x1).lr32(NAME([this]() -> u32 {
++		const bool empty = m_copro_fifo_in->is_empty();
++		const u32 v = m_copro_fifo_in->read();
++		if (!empty)
++			if (FILE *f = m2_tgp_log()) fprintf(f, "in %x\n", v);
++		return v;
++	}));
++	map(0x2, 0x2).lw32(NAME([this](u32 data) {
++		if (FILE *f = m2_tgp_log()) fprintf(f, "out %x\n", data);
++		m_copro_fifo_out->write(data);
++	}));
+ 	map(0x3, 0x3).w(FUNC(model2_tgp_state::copro_tgp_bank_w));
+ }
+ 
+ u32 model2_tgp_state::copro_tgp_memory_r(offs_t offset)
+ {
+ 	offs_t adr = (m_copro_tgp_bank_reg & 0xff0000) | offset;
++	u32 v = 0;
+ 
+ 	if(adr & 0x800000) {
+ 		adr &= (m_copro_data->bytes() >> 2) - 1;
+-		return m_copro_data->as_u32(adr);
+-	}
+-
+-	if(adr & 0x400000) {
++		v = m_copro_data->as_u32(adr);
++	} else if(adr & 0x400000) {
+ 		adr &= 0x7fff;
+-		return m_bufferram[adr];
++		v = m_bufferram[adr];
+ 	}
+ 
+-	return 0;
++	if (!machine().side_effects_disabled())
++		if (FILE *f = m2_tgp_log()) fprintf(f, "mr %x %x\n", offset, v);
++	return v;
+ }
+ 
+ void model2_tgp_state::copro_tgp_memory_w(offs_t offset, u32 data, u32 mem_mask)
+ {
+ 	offs_t adr = (m_copro_tgp_bank_reg & 0xff0000) | offset;
++	if (FILE *f = m2_tgp_log()) fprintf(f, "mw %x %x %x\n", offset, data, mem_mask);
+ 	if(adr & 0x400000) {
+ 		adr &= 0x7fff;
+ 		COMBINE_DATA(&m_bufferram[adr]);
+@@ -508,6 +551,7 @@ void model2_tgp_state::copro_tgp_memory_w(offs_t offset, u32 data, u32 mem_mask)
+ void model2_tgp_state::copro_tgp_bank_w(offs_t offset, u32 data, u32 mem_mask)
+ {
+ 	COMBINE_DATA(&m_copro_tgp_bank_reg);
++	if (FILE *f = m2_tgp_log()) fprintf(f, "bank %x\n", m_copro_tgp_bank_reg);
+ 	if(m_copro_tgp_bank_reg & 0xc00000)
+ 		m_copro_tgp_bank.select(0);
+ 	else
+@@ -612,6 +656,12 @@ void model2_tgp_state::copro_halt()
+ 
+ void model2_tgp_state::copro_boot()
+ {
++	if (FILE *f = m2_tgp_log()) {
++		fprintf(f, "up %u", m_coprocnt);
++		for (u32 i = 0; i < m_coprocnt; i++)
++			fprintf(f, " %x", m_copro_tgp_program[i]);
++		fprintf(f, "\n");
++	}
+ 	m_copro_tgp->set_input_line(INPUT_LINE_HALT, CLEAR_LINE);
+ 	m_copro_tgp->pulse_input_line(INPUT_LINE_RESET, attotime::zero);
+ }
+@@ -2425,7 +2475,11 @@ void model2_state::screen_vblank(int state)
+ 	m_framenum = m_screen->frame_number();
+ 
+ 	// if 60 Hz mode or frame number is even, trigger geometrizer to start new frame
+-	if ((m_videocontrol & 1) == 0 || (m_framenum & 1) == 0)
++	const bool parse = (m_videocontrol & 1) == 0 || (m_framenum & 1) == 0;
++	// daytona-arcade-recomp: geometrizer log (M2TRACE_GEOLOG, model2_v.cpp)
++	if (FILE *f = m2_geo_log())
++		fprintf(f, "vb %u %llu %d\n", unsigned(m_framenum), (unsigned long long)m_maincpu->insn_count(), parse ? 1 : 0);
++	if (parse)
+ 		geo_parse();
+ 
+ 	const u32 line = 1 << 0;
+diff --git a/src/mame/sega/model2_v.cpp b/src/mame/sega/model2_v.cpp
+index 3a5bfa51ba..4b9589664b 100644
+--- a/src/mame/sega/model2_v.cpp
++++ b/src/mame/sega/model2_v.cpp
+@@ -94,6 +94,8 @@
+ 
+ #include "corefloat.h"
+ 
++FILE *m2_geo_log(); // daytona-arcade-recomp (model2.cpp)
++
+ #include <cmath>
+ #include <limits>
+ 
+@@ -515,6 +517,16 @@ void model2_state::model2_3d_process_polygon(raster_state *raster, u32 attr)
+ 			for (int i = 0; i < clipped_verts; i++)
+ 				poly->v[i] = verts_out[i];
+ 
++			// daytona-arcade-recomp: each polygon kept for rendering (M2TRACE_GEOLOG)
++			if (FILE *f = m2_geo_log()) {
++				fprintf(f, "poly %x %x %x %x %x %x %x %x %x %d %d %d %d %d %d %d", poly->z, poly->window, poly->texheader[0], poly->texheader[1],
++						poly->texheader[2], poly->texheader[3], poly->luma, poly->texlod, poly->num_vertices,
++						poly->viewport[0], poly->viewport[1], poly->viewport[2], poly->viewport[3], poly->center[0], poly->center[1], raster->reverse);
++				for (int i = 0; i < poly->num_vertices; i++)
++					fprintf(f, " %x %x %x %x %x", f2u(poly->v[i].x), f2u(poly->v[i].y), f2u(poly->v[i].pz), f2u(poly->v[i].pu), f2u(poly->v[i].pv));
++				fprintf(f, "\n");
++			}
++
+ 			/* add to our sorted list */
+ 			raster->poly_sorted_list[object.z] = poly;
+ 			poly->next = zpoly;
+@@ -693,16 +705,24 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
+ 	raster_state *raster = m_raster.get();
+ 	int32_t z;
+ 
++	// daytona-arcade-recomp: 3D framebuffer log (M2TRACE_GEOLOG "fb" lines)
++	FILE *const fbl = m2_geo_log();
++	const unsigned fbframe = unsigned(m_screen->frame_number());
++
+ 	// if the geometrizer hasn't presented a new frame, just copy the previous frame and bail
+ 	if (m_render_done)
+ 	{
++		if (fbl) fprintf(fbl, "fb %u same\n", fbframe);
+ 		copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
+ 		return;
+ 	}
+ 
+ 	/* if we have nothing to render, bail */
+ 	if (raster->poly_list_index == 0)
++	{
++		if (fbl) fprintf(fbl, "fb %u empty\n", fbframe);
+ 		return;
++	}
+ 
+ 	m_renderer->destmap().fill(0x00000000, cliprect);
+ 	m_renderer->fillmap().fill(0x00, cliprect);
+@@ -735,6 +755,29 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
+ 	}
+ 	m_renderer->wait("End of frame");
+ 
++	if (fbl) {
++		// FNV-1a over the visible area of the 3D layer (cliprect), row by row
++		u64 h = 0xcbf29ce484222325ULL;
++		for (int y = cliprect.min_y; y <= cliprect.max_y; y++)
++			for (int x = cliprect.min_x; x <= cliprect.max_x; x++) {
++				const u32 px = m_renderer->destmap().pix(y, x);
++				for (int b = 0; b < 4; b++) { h ^= (px >> (8 * b)) & 0xff; h *= 0x100000001b3ULL; }
++			}
++		fprintf(fbl, "fb %u %016llx %d %d %d %d %d %d\n", fbframe, (unsigned long long)h, m_crtc_xoffset, m_crtc_yoffset,
++				cliprect.min_x, cliprect.max_x, cliprect.min_y, cliprect.max_y);
++		static int every = getenv("M2TRACE_FBDUMP_EVERY") ? atoi(getenv("M2TRACE_FBDUMP_EVERY")) : 0;
++		static const char *dir = getenv("M2TRACE_FBDUMP_DIR");
++		if (dir && every > 0 && fbframe % every == 0) {
++			char path[512];
++			snprintf(path, sizeof path, "%s/mame_%05u.rgb", dir, fbframe);
++			if (FILE *d = fopen(path, "wb")) {
++				for (int y = cliprect.min_y; y <= cliprect.max_y; y++)
++					fwrite(&m_renderer->destmap().pix(y, cliprect.min_x), 4, cliprect.max_x - cliprect.min_x + 1, d);
++				fclose(d);
++			}
++		}
++	}
++
+ 	copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
+ 
+ 	m_render_done = true;
+@@ -768,6 +811,9 @@ void model2_state::draw_framebuffer(bitmap_rgb32 &bitmap, const rectangle &clipr
+ /* 3D Rasterizer main data input port */
+ void model2_state::model2_3d_push(raster_state *raster, u32 input)
+ {
++	// daytona-arcade-recomp: every word the geometrizer hands the rasterizer
++	if (FILE *f = m2_geo_log()) fprintf(f, "p %x\n", input);
++
+ 	/* see if we have a command in progress */
+ 	if (raster->cur_command != 0)
+ 	{
+@@ -2406,6 +2452,11 @@ void model2_state::video_start()
+ 
+ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect)
+ {
++	// daytona-arcade-recomp: screen update position (M2TRACE_GEOLOG "su")
++	if (FILE *f = m2_geo_log())
++		fprintf(f, "su %u %llu %d %d %d %d\n", unsigned(screen.frame_number()), (unsigned long long)m_maincpu->insn_count(),
++				cliprect.min_x, cliprect.max_x, cliprect.min_y, cliprect.max_y);
++
+ 	// if the scroll color table was written to, we need to refresh the palette
+ 	if (m_palette_dirty)
+ 	{
+@@ -2448,5 +2499,28 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
+ 
+ 	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
+ 
++	// daytona-arcade-recomp: the composed screen (M2TRACE_GEOLOG "scr")
++	if (FILE *f = m2_geo_log()) {
++		u64 h = 0xcbf29ce484222325ULL;
++		for (int y = cliprect.min_y; y <= cliprect.max_y; y++)
++			for (int x = cliprect.min_x; x <= cliprect.max_x; x++) {
++				const u32 px = bitmap.pix(y, x);
++				for (int b = 0; b < 4; b++) { h ^= (px >> (8 * b)) & 0xff; h *= 0x100000001b3ULL; }
++			}
++		fprintf(f, "scr %u %016llx\n", unsigned(screen.frame_number()), (unsigned long long)h);
++		static int every = getenv("M2TRACE_FBDUMP_EVERY") ? atoi(getenv("M2TRACE_FBDUMP_EVERY")) : 0;
++		static const char *dir = getenv("M2TRACE_FBDUMP_DIR");
++		const unsigned fr = unsigned(screen.frame_number());
++		if (dir && every > 0 && fr % every == 0) {
++			char path[512];
++			snprintf(path, sizeof path, "%s/mame_scr_%05u.rgb", dir, fr);
++			if (FILE *d = fopen(path, "wb")) {
++				for (int y = cliprect.min_y; y <= cliprect.max_y; y++)
++					fwrite(&bitmap.pix(y, cliprect.min_x), 4, cliprect.max_x - cliprect.min_x + 1, d);
++				fclose(d);
++			}
++		}
++	}
++
+ 	return 0;
+ }

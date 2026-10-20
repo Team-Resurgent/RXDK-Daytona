@@ -1,0 +1,53 @@
+name: Vita compile check
+on:
+  push:
+    paths: ['platform/vita/**', 'src/**', 'cmake/**', 'scripts/setup.py', 'scripts/build_vita.py', 'tests/test_vita_*.cpp', 'tests/vita_sdl_shim/**', 'tests/test_build_vita.py', '.github/workflows/vita.yml']
+  pull_request:
+    paths: ['platform/vita/**', 'src/**', 'cmake/**', 'scripts/setup.py', 'scripts/build_vita.py', 'tests/test_vita_*.cpp', 'tests/vita_sdl_shim/**', 'tests/test_build_vita.py', '.github/workflows/vita.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  input-and-build-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Input and timing tests
+        run: |
+          mkdir -p build
+          g++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined tests/test_vita_controls.cpp -o build/test_vita_controls
+          build/test_vita_controls
+          g++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc tests/test_vita_performance.cpp -o build/test_vita_performance
+          build/test_vita_performance
+          g++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -Itests/vita_sdl_shim tests/test_vita_text.cpp -o build/test_vita_text
+          build/test_vita_text
+          python3 -m unittest discover -s tests -p test_build_vita.py -v
+  arm-compile:
+    runs-on: ubuntu-24.04
+    container: vitasdk/vitasdk:2026.08-20260815
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Host tools
+        run: |
+          apt-get update
+          apt-get install -y git python3 cmake make g++
+      - name: Fetch the existing pinned runtime dependencies
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          sys.path.insert(0, "scripts")
+          import setup
+          os.makedirs(setup.EXTERN, exist_ok=True)
+          setup.fetch(*setup.SOFTFLOAT, "softfloat")
+          setup.fetch(*setup.YMFM, "ymfm")
+          PY
+      - name: Compile the ARM runtime and Vita frontend without ROM data
+        run: python3 scripts/build_vita.py --compile-check --jobs 2
+      # Deliberately no game-code stubs, ROM secrets, VPK or artifact upload.
+      # This job checks ARM compilation, not final linking or gameplay.

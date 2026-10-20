@@ -1,0 +1,16 @@
+# daytona (Revision A, 1994): enhancement hooks (m2recomp --hooks). "ADDRESS name": the
+# recompiled code calls rt::hook_<name>(c) just before the instruction at
+# ADDRESS. Addresses only, our own analysis (rules.md rule 7); see
+# src/runtime/enhance.h and seeds/daytona93_hooks.txt, whose hooks these are,
+# carried over by scripts/seed_map.py --hooks.
+#
+# The draw-list routine is daytona93's 0x16f74..0x17078 moved by 0x490, the
+# same instructions (masked: branch and address words aside) and the same RAM
+# (count 0x5016c0, cells from 0x5016c1, budget 0x5010f4 set at boot, 0x12f8).
+00017508 draw_list
+# Cost observers: r4 is the updated cumulative cost at each store; r5/r4
+# are consumed cost/allowance at each unsigned comparison. Diagnostic only.
+00017b00 scenery_budget_check
+00017d28 scenery_budget_check
+00017c04 scenery_cost
+00017d50 scenery_cost

@@ -1,0 +1,18 @@
+# race_basic played on to 20,000 frames (5 min 48 s): the accelerator is let go
+# at 6,000, the race runs out of time, then game over and the screens after it.
+# Reaches 81 of the entry points scripts/seed_scan.py found, the MAME harvest
+# none (its runs ended at 6,000). Coin up, start, confirm every select screen.
+# Frame numbers are at 57.52 Hz: 575 frames = 10 s. Attract is running by 1200.
+# Default settings take 3 coins per credit (screen shows CREDIT n/3).
+frames 20000
+1200-1209 coin=1
+1240-1249 coin=1
+1280-1289 coin=1
+1400-1409 start=1
+# course select, then transmission select: keep confirming
+1600-1609 start=1
+1800-1809 vr1=1
+2000-2009 start=1
+2200-2209 vr1=1
+2400-2409 start=1
+1400-5999 accel=0xe0

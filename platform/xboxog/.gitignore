@@ -1,0 +1,7 @@
+# Generated from the user's own ROM set: never committed.
+rxdk.project.json
+gamecode/
+libs/
+out/
+game/
+dist/

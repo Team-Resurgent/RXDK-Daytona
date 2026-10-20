@@ -1,0 +1,29 @@
+DIAG02 validation - 2026-09-30
+
+Artifacts were created locally; no GitHub write or push was performed.
+
+Passed:
+- C++ native-log test executable with AddressSanitizer/UndefinedBehaviorSanitizer.
+  Includes header/truncate/append, formatted messages, partial writes, zero
+  writes, negative errors, oversize reported writes, open/sync/close failures,
+  sticky status, truncation, 1 MiB cap and reset.
+- Existing C++ input/timing tests with AddressSanitizer/UndefinedBehaviorSanitizer.
+- Profiling and overlay-format tests with AddressSanitizer/UndefinedBehaviorSanitizer.
+- Text pixel/layout batching tests with AddressSanitizer/UndefinedBehaviorSanitizer.
+- Eight existing Python Vita build-driver tests.
+- Ten Python installer tests: original/startup/performance revisions, repeat
+  application, unknown-edit rejection, dry run, backups, symlink rejection,
+  CRLF input and rollback after simulated write failure.
+- Python syntax compilation of the self-contained installer.
+- git apply --check of DIAG02 patch on the earlier performance-patched sources.
+- Frontend C++ syntax checking with temporary host API declaration shims.
+
+Not performed:
+- Actual VitaSDK ARM compilation or full generated-game linking of DIAG02.
+- Vita device execution, verification of native filesystem sync behavior,
+  confirmation of the missing-logging root cause, or performance improvement.
+
+The temporary frontend API declarations are only a syntax check, not a native
+SDK or a fake game build. They are not included in the application sources.
+The supplied tests/vita_log_shim header is used only by the host logger tests;
+production CMake does not add it to an include path.

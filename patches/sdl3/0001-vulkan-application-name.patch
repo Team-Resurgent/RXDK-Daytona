@@ -1,0 +1,19 @@
+diff --git a/src/gpu/vulkan/SDL_gpu_vulkan.c b/src/gpu/vulkan/SDL_gpu_vulkan.c
+index 330bb1a37..24f237c0f 100644
+--- a/src/gpu/vulkan/SDL_gpu_vulkan.c
++++ b/src/gpu/vulkan/SDL_gpu_vulkan.c
+@@ -11971,9 +11971,12 @@ static Uint8 VULKAN_INTERNAL_CreateInstance(VulkanRenderer *renderer, VulkanFeat
+ 
+     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+     appInfo.pNext = NULL;
+-    appInfo.pApplicationName = NULL;
++    /* daytona-arcade-recomp: the application's name (SDL_SetAppMetadata) and no
++       engine name, as native Vulkan programs report themselves; overlays such
++       as MangoHud then show the API (Vulkan) instead of "SDLGPU". */
++    appInfo.pApplicationName = SDL_GetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING);
+     appInfo.applicationVersion = 0;
+-    appInfo.pEngineName = "SDLGPU";
++    appInfo.pEngineName = NULL;
+     appInfo.engineVersion = SDL_VERSION;
+     appInfo.apiVersion = features->usesCustomVulkanOptions
+                              ? features->desiredApiVersion

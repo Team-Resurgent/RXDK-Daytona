@@ -1,0 +1,121 @@
+diff --git a/src/devices/cpu/m68000/m68000.cpp b/src/devices/cpu/m68000/m68000.cpp
+index 847703ecd0..913b86bdc4 100644
+--- a/src/devices/cpu/m68000/m68000.cpp
++++ b/src/devices/cpu/m68000/m68000.cpp
+@@ -144,6 +144,11 @@ u16 m68000_device::get_fc() const noexcept
+ 	return (m_base_ssw | (m_sr & SR_S ? SSW_S : 0)) & 7;
+ }
+ 
++u64 g_m2snd_insn = 0;
++FILE *g_m2snd_log = nullptr;
++static const void *g_m2snd_cpu = nullptr;
++static bool g_m2snd_snap = true;
++
+ void m68000_device::execute_run()
+ {
+ 	m_icount -= m_count_before_instruction_step;
+@@ -158,9 +163,23 @@ void m68000_device::execute_run()
+ 			(this->*(m_handlers_p[m_inst_state]))();
+ 
+ 		while(m_icount > 0) {
++			if(g_m2snd_log && g_m2snd_cpu == this && m_inst_state == S_INTERRUPT) {
++				fprintf(g_m2snd_log, "i %llu %u\n", (unsigned long long)g_m2snd_insn, m_int_level);
++				g_m2snd_snap = true;
++			}
+ 			if(m_inst_state >= S_first_instruction) {
+ 				m_ipc = m_pc - 2;
+ 				m_irdi = m_ird;
++				if(g_m2snd_log && g_m2snd_cpu == this) {
++					if(g_m2snd_snap || !(g_m2snd_insn & 4095)) {
++						fprintf(g_m2snd_log, "s %llu %06x %04x", (unsigned long long)g_m2snd_insn, m_ipc, m_sr);
++						for(int i = 0; i < 15; i++)
++							fprintf(g_m2snd_log, " %08x", m_da[i]);
++						fprintf(g_m2snd_log, " %08x %08x\n", m_da[m_sp], m_da[m_sp == 15 ? 16 : 15]);
++						g_m2snd_snap = false;
++					}
++					g_m2snd_insn++;
++				}
+ 
+ 				if(debugger_enabled())
+ 					debugger_instruction_hook(m_ipc);
+@@ -222,6 +241,11 @@ void m68000_device::device_start()
+ {
+ 	init_decode_table();
+ 
++	if(const char *path = getenv("M2TRACE_SNDLOG"); path && !g_m2snd_log && std::string(tag()).find("sndcpu") != std::string::npos) {
++		g_m2snd_log = fopen(path, "w");
++		g_m2snd_cpu = this;
++	}
++
+ 	m_cmpild_instr_callback.resolve();
+ 	m_rte_instr_callback.resolve();
+ 	m_tas_write_callback.resolve();
+diff --git a/src/devices/cpu/m68000/m68000.h b/src/devices/cpu/m68000/m68000.h
+index 6f067a6ba7..3d2b2f0e0a 100644
+--- a/src/devices/cpu/m68000/m68000.h
++++ b/src/devices/cpu/m68000/m68000.h
+@@ -7,6 +7,13 @@
+ 
+ #include "m68kcommon.h"
+ 
++#include <cstdio>
++
++// daytona-arcade-recomp oracle (M2TRACE_SNDLOG): the sound 68000's instruction
++// count and log, shared with the sound board's device handlers.
++extern u64 g_m2snd_insn;
++extern FILE *g_m2snd_log;
++
+ class m68000_device : public m68000_base_device
+ {
+ public:
+diff --git a/src/mame/shared/segam1audio.cpp b/src/mame/shared/segam1audio.cpp
+index e8971ea58d..b46ec0c335 100644
+--- a/src/mame/shared/segam1audio.cpp
++++ b/src/mame/shared/segam1audio.cpp
+@@ -14,17 +14,39 @@
+ #include "machine/clock.h"
+ #include "speaker.h"
+ 
++#include "cpu/m68000/m68000.h"
++
++// daytona-arcade-recomp oracle (M2TRACE_SNDLOG): every device access by the
++// sound 68000, tagged with the index of the instruction making it.
++namespace {
++template <typename T> T m2snd_logr(offs_t a, T v) {
++	if(g_m2snd_log) fprintf(g_m2snd_log, "r %llu %06x %x\n", (unsigned long long)(g_m2snd_insn - 1), a, unsigned(v));
++	return v;
++}
++void m2snd_logw(offs_t a, unsigned v) {
++	if(g_m2snd_log) fprintf(g_m2snd_log, "w %llu %06x %x\n", (unsigned long long)(g_m2snd_insn - 1), a, v);
++}
++}
++
+ void segam1audio_device::segam1audio_map(address_map &map)
+ {
+ 	map(0x000000, 0x03ffff).rom();
+ 	map(0x080000, 0x09ffff).rom().region("sndcpu", 0x20000); // mirror of upper ROM socket
+-	map(0xc20000, 0xc20003).rw(m_uart, FUNC(i8251_device::read), FUNC(i8251_device::write)).umask16(0x00ff);
+-	map(0xc40000, 0xc40007).rw(m_multipcm_1, FUNC(multipcm_device::read), FUNC(multipcm_device::write)).umask16(0x00ff);
+-	map(0xc40012, 0xc40013).nopw();
+-	map(0xc50000, 0xc50001).w(FUNC(segam1audio_device::m1_snd_mpcm_bnk1_w));
+-	map(0xc60000, 0xc60007).rw(m_multipcm_2, FUNC(multipcm_device::read), FUNC(multipcm_device::write)).umask16(0x00ff);
+-	map(0xc70000, 0xc70001).w(FUNC(segam1audio_device::m1_snd_mpcm_bnk2_w));
+-	map(0xd00000, 0xd00007).rw(m_ym, FUNC(ym3438_device::read), FUNC(ym3438_device::write)).umask16(0x00ff);
++	map(0xc20000, 0xc20003).lrw8(
++		NAME([this](offs_t o) { return m2snd_logr<u8>(0xc20001 + o * 2, m_uart->read(o)); }),
++		NAME([this](offs_t o, u8 d) { m2snd_logw(0xc20001 + o * 2, d); m_uart->write(o, d); })).umask16(0x00ff);
++	map(0xc40000, 0xc40007).lrw8(
++		NAME([this](offs_t o) { return m2snd_logr<u8>(0xc40001 + o * 2, m_multipcm_1->read()); }),
++		NAME([this](offs_t o, u8 d) { m2snd_logw(0xc40001 + o * 2, d); m_multipcm_1->write(o, d); })).umask16(0x00ff);
++	map(0xc40012, 0xc40013).lw16(NAME([](offs_t o, u16 d, u16 m) { m2snd_logw(0xc40012, d & m); }));
++	map(0xc50000, 0xc50001).lw16(NAME([this](offs_t o, u16 d, u16 m) { m2snd_logw(0xc50000, d & m); m1_snd_mpcm_bnk1_w(d); }));
++	map(0xc60000, 0xc60007).lrw8(
++		NAME([this](offs_t o) { return m2snd_logr<u8>(0xc60001 + o * 2, m_multipcm_2->read()); }),
++		NAME([this](offs_t o, u8 d) { m2snd_logw(0xc60001 + o * 2, d); m_multipcm_2->write(o, d); })).umask16(0x00ff);
++	map(0xc70000, 0xc70001).lw16(NAME([this](offs_t o, u16 d, u16 m) { m2snd_logw(0xc70000, d & m); m1_snd_mpcm_bnk2_w(d); }));
++	map(0xd00000, 0xd00007).lrw8(
++		NAME([this](offs_t o) { return m2snd_logr<u8>(0xd00001 + o * 2, m_ym->read(o)); }),
++		NAME([this](offs_t o, u8 d) { m2snd_logw(0xd00001 + o * 2, d); m_ym->write(o, d); })).umask16(0x00ff);
+ 	map(0xf00000, 0xf0ffff).ram(); // real PCB actually has 2x 8kBx8-bit SRAMs (16kB total)
+ }
+ 

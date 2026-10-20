@@ -1,0 +1,5 @@
+# Attract only, no input, for 9,000 frames (2 min 36 s): the whole attract
+# loop, past the 600 frames scripts/m2_check.sh checks with no scenario.
+# Reaches 74 of the entry points scripts/seed_scan.py found (the MAME harvest
+# never saw them: its runs were shorter).
+frames 9000

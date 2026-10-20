@@ -1,0 +1,15 @@
+# Revision A, Long circuit (Expert, 2 laps). On this set's Circuit Select the
+# cursor follows the wheel's position, not presses: hold it right while
+# stepping on the accelerator to choose, then centre it for transmission
+# select. Coin up as scripts/inputs/race_basic.txt.
+frames 6000
+1200-1209 coin=1
+1240-1249 coin=1
+1280-1289 coin=1
+1400-1409 start=1
+1560-1729 steer=0xff
+1700-1719 accel=0xe0
+1730-1859 steer=0x80
+1860-1879 accel=0xe0
+1990-5999 accel=0xe0
+2190-5999 steer=0x98

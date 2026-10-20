@@ -1,0 +1,58 @@
+name: Build
+# The tools and tests, built the way setup builds them, on Windows (Clang,
+# the default, and MSVC), macOS and Linux (GCC and Clang). No ROM set: the
+# game itself is not recompiled here.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: windows-clang, os: windows-2022, compiler: clang}
+          - {name: windows-msvc, os: windows-2022, compiler: msvc}
+          - {name: macos, os: macos-15}
+          - {name: linux-gcc, os: ubuntu-24.04}
+          - {name: linux-clang, os: ubuntu-24.04, cc: clang, cxx: clang++}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup regression tests
+        run: python -m unittest discover -s tests -p test_setup.py -v
+      # The runners have no winget, so setup.ps1 cannot run here; check it parses.
+      - name: setup.ps1 parses
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/setup.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }
+      - name: Setup (Windows)
+        if: runner.os == 'Windows'
+        env:
+          M2_COMPILER: ${{ matrix.compiler }}
+        run: python scripts/setup.py
+      # setup.sh's brew step reinstalls Homebrew Python, which clashes with the
+      # runner's own; the rest of setup is the same.
+      - name: Setup (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja
+          python3 scripts/setup.py
+      - name: Setup (Linux, setup.sh with its apt packages)
+        if: runner.os == 'Linux'
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: ./setup.sh
+      - name: Tests
+        run: ctest --test-dir build -C Release --output-on-failure

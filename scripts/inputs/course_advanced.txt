@@ -1,0 +1,12 @@
+# Circuit select is live by ~1500: steer centre->right once (Medium), step to choose.
+frames 6000
+1200-1209 coin=1
+1240-1249 coin=1
+1280-1289 coin=1
+1400-1409 start=1
+1560-1589 steer=0xe0
+1590-1639 steer=0x80
+1660-1679 accel=0xe0
+1820-1839 accel=0xe0
+1950-5999 accel=0xe0
+2150-5999 steer=0x98
