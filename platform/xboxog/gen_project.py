@@ -100,7 +100,7 @@ def main() -> int:
         "defines": defines,
         # -Os after RXDK's -O3: on the Dreamcast 2.5 MB of code instead of
         # 6.7 MB at -O2, and memory is what the Xbox is short of.
-        "compileFlags": FLOAT_FLAGS + ["-Os", "-Wno-unused-label"],
+        "compileFlags": FLOAT_FLAGS + ["-O2", "-Wno-unused-label"],
         "cppStandard": "c++20", "outputDir": "out"})
 
     sources = [HERE / "src/main.cpp"] + [ROOT / f"src/runtime/{n}.cpp" for n in RUNTIME] + \
@@ -111,7 +111,9 @@ def main() -> int:
         "includePaths": [rel(ROOT / "src", HERE), rel(HERE / "src", HERE)],
         "projectReferences": ["gamecode", "libs/softfloat", "libs/ymfm"],
         "libraries": LIBRARIES,
-        "defines": defines,
+        # M2_FAST_MIX: the native sound mixer's fast path (the same samples),
+        # in the runtime only: the game code does not include the mixer.
+        "defines": defines + ["M2_FAST_MIX"],
         "compileFlags": FLOAT_FLAGS,
         "cppStandard": "c++20", "outputDir": "out",
         "deployPaths": ["data=game/data"],

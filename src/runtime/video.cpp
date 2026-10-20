@@ -666,6 +666,7 @@ void Video::compose16(int cat, const bool uses[4], const uint8_t *extra_lines) {
             ++composes_[cat];
             if (full) ++full_composes_[cat];
             composed_lines_[cat] += uint64_t(count);
+            for (int y = 0; y < H; ++y) changed16_[cat][y] |= full ? 1 : lines[y];
         }
     }
     dirty = full = false;

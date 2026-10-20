@@ -5,10 +5,12 @@ Daytona USA on the original Xbox (733 MHz Pentium III, 64 MB), built with
 the desktop build: the game code is generated from your own ROM set, so the
 result is yours alone and is never shared.
 
-Status: runs on a console at the arcade's full 57.5 Hz, the picture drawn
-by the Xbox's GPU every second frame (about 25-29 pictures a second), in
-64 MB. Tested in the attract mode; whole races are not yet verified. (xemu
-runs it too, much slower than a console.)
+Status: runs on a console at the arcade's 57.5 Hz, the picture drawn by
+the Xbox's GPU every second frame, in 64 MB: about 28 pictures a second in
+the attract mode, 21-27 in the busiest stretches of a race, where the game
+may also run a little slower for a moment rather than freeze the picture.
+Tested with the attract mode and a recorded race on a console. (xemu runs
+it too, much slower than a console.)
 
 <p>
   <img src="images/xbox-title.png" width="49%" alt="The title screen on an original Xbox">
@@ -98,5 +100,8 @@ The frontend, in `src/`:
 - `main.cpp`: the loop, paced to the board's 57.52 Hz, a picture every
   second frame.
 
-Its log goes to the debug output (serial in xemu): memory, frame times, ROM
-cache misses, polygons and textures every 10 seconds.
+Its log goes to the debug output (serial in xemu): every 10 seconds memory,
+frame times by stage, the slowest frame and what it spent its time on, ROM
+blocks unpacked, polygons and textures. For measuring, a recorded input
+script (`scripts/inputs`, e.g. `race_basic.txt`) copied next to
+`default.xbe` as `inputs.txt` plays instead of the controller.

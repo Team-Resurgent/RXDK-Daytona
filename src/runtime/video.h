@@ -120,6 +120,11 @@ public:
     // have not changed since is not composed, and keeps its pixels.
     uint64_t background16_generation() const { return back16_generation_; }
     uint64_t foreground16_generation() const { return front16_generation_; }
+    // The lines of a 16-bit layer (0 back, 1 front) composed since the
+    // frontend last took them (lines16_taken): a frontend that copies the
+    // layer to the GPU copies only those (all of them after a full compose).
+    const uint8_t *lines16_changed(int cat) const { return changed16_[cat & 1]; }
+    void lines16_taken(int cat) { std::fill_n(changed16_[cat & 1], H, uint8_t(0)); }
     // Since the start, per layer buffer (0 back, 1 front): composes, those
     // of every line, and the lines composed.
     uint64_t composes(int cat) const { return composes_[cat]; }
@@ -280,6 +285,7 @@ private:
     bool back_scroll_ = false, scroll_all_dirty_ = true, scroll_allowed_ = true; // (back_scrolled, scroll_all_changed)
     int scroll_x_ = 0, scroll_y_ = 0;
     uint8_t scroll_dirty_[4096] = {};
+    uint8_t changed16_[2][H] = {}; // lines16_changed
     bool scroll_mode(int &sx, int &sy) const;
 #endif
     std::vector<uint32_t> background_gpu_, foreground_gpu_;

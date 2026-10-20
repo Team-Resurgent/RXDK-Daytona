@@ -100,6 +100,13 @@ float NativeSampleBank::value(const Sample& s, uint32_t frame) const noexcept {
     return float(raw < 2048 ? int(raw) : int(raw) - 4096) * (1.0f / 2048.0f);
 }
 
+const uint8_t* NativeSampleBank::contiguous(const Sample& s) const noexcept {
+    const uint32_t bytes = s.format == Format::Signed8 ? s.frames : (s.frames + 1) / 2 * 3;
+    if (s.byte_start + bytes <= kWindow) return rom_ + s.byte_start;
+    if (s.byte_start >= kWindow) return rom_ + size_t(data_bank_) * kWindow + (s.byte_start - kWindow);
+    return nullptr;
+}
+
 float NativeSampleBank::value(unsigned index, uint32_t frame) const noexcept {
     const Sample* s = sample(index);
     return s && frame < s->frames ? value(*s, frame) : 0.0f;
@@ -258,6 +265,27 @@ void NativeSampleMixer::set_peak_limiter(bool enabled) noexcept {
     limiter_gain_ = 1.0f;
 }
 
+#ifdef M2_FAST_MIX
+// M2_FAST_MIX (the original Xbox, where this mixer was a fifth of a race
+// frame): a voice whose sample is in one piece of the ROM reads its bytes
+// through a pointer, 8-bit ones through a table, instead of value()'s window
+// mapping and format test for every point. The same samples and arithmetic.
+namespace {
+struct Signed8Table {
+    float value[256];
+    Signed8Table() {
+        for (int i = 0; i < 256; ++i) value[i] = float(i < 128 ? i : i - 256) * (1.0f / 128.0f);
+    }
+};
+const Signed8Table kSigned8;
+inline float packed12(const uint8_t* p, uint32_t frame) noexcept {
+    const uint8_t* q = p + (frame / 2) * 3;
+    const unsigned raw = (frame & 1) ? (unsigned(q[2]) << 4) | (q[1] >> 4) : (unsigned(q[0]) << 4) | (q[1] & 15);
+    return float(raw < 2048 ? int(raw) : int(raw) - 4096) * (1.0f / 2048.0f);
+}
+} // namespace
+#endif
+
 void NativeSampleMixer::render(float* out, size_t frames) noexcept {
     if (!out || frames > std::numeric_limits<size_t>::max() / 2) return;
     std::fill_n(out, frames * 2, 0.0f);
@@ -266,6 +294,34 @@ void NativeSampleMixer::render(float* out, size_t frames) noexcept {
         const uint64_t end = uint64_t(v.end) << 32;
         const uint64_t loop = uint64_t(v.loop_start) << 32;
         const float volume = volumes_[v.effect];
+#ifdef M2_FAST_MIX
+        if (const uint8_t* bytes = v.bank->contiguous(*v.sample)) {
+            const bool eight = v.sample->format == NativeSampleBank::Format::Signed8;
+            for (size_t frame = 0; frame < frames; ++frame) {
+                if (v.stage != Stage::Sustain) {
+                    advance_envelope(v);
+                    if (!v.active) break;
+                }
+                const uint32_t index = uint32_t(v.phase >> 32);
+                const uint32_t next = index + 1 < v.end ? index + 1 : (v.loop ? v.loop_start : index);
+                const float a = eight ? kSigned8.value[bytes[index]] : packed12(bytes, index);
+                const float b = eight ? kSigned8.value[bytes[next]] : packed12(bytes, next);
+                const float fraction = float(uint32_t(v.phase)) * float(1.0 / kPhaseScale);
+                const float sample = (a + (b - a) * fraction) * v.level * volume;
+                out[frame * 2] += sample * v.left;
+                out[frame * 2 + 1] += sample * v.right;
+                v.phase += v.step;
+                if (v.phase >= end) {
+                    if (v.loop) v.phase = loop + (v.phase - end) % (end - loop);
+                    else {
+                        v.active = false;
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+#endif
         for (size_t frame = 0; frame < frames && v.active; ++frame) {
             advance_envelope(v);
             if (!v.active) break;

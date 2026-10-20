@@ -45,6 +45,9 @@ private:
     friend class NativeSampleMixer;
     uint8_t byte(uint32_t logical) const noexcept;
     float value(const Sample& sample, uint32_t frame) const noexcept;
+    // The sample's bytes when they are in one piece of the ROM (not split
+    // across the fixed and banked windows), else null. M2_FAST_MIX only.
+    const uint8_t* contiguous(const Sample& sample) const noexcept;
     bool mapped_range(uint32_t start, uint32_t bytes) const noexcept;
     const uint8_t* rom_ = nullptr;
     size_t rom_bytes_ = 0;

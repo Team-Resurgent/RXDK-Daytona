@@ -27,6 +27,12 @@
 // light alone); with dumping on, each new material is written to
 // T:\dump\<key>.tga at its source size. A texture let go (changed, evicted)
 // is released two frames later, when the GPU is done with it.
+//
+// Model 2 has no blending: its translucency (smoke, shadows) is the checker
+// flag (texheader[0] bit 15), which draws only every other pixel, as a
+// checkerboard. Here a checkerboard is written into the stencil each frame
+// and checker polygons are drawn where it is set: 1 output pixel cells, the
+// look of the arcade's at 1.25 times its resolution.
 #pragma once
 
 #ifndef M2_DC_SPEED
@@ -63,32 +69,60 @@ public:
             FAILED(device_->CreateTexture(512, 512, 1, 0, D3DFMT_LIN_A1R5G5B5, 0, &foreground_)) ||
             FAILED(device_->CreateTexture(512, 512, 1, 0, D3DFMT_LIN_R5G6B5, 0, &scroll_)))
             throw std::runtime_error("no memory for the tile layer textures");
+        // The checkerboard: 2 x 2 texels, alpha set where x ^ y is odd (a 2 x 2
+        // texture's swizzled order is its linear one).
+        if (FAILED(device_->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, 0, &checker_)))
+            throw std::runtime_error("no memory for the checker texture");
+        D3DLOCKED_RECT locked;
+        if (SUCCEEDED(checker_->LockRect(0, &locked, nullptr, 0))) {
+            auto *texels = static_cast<uint32_t *>(locked.pBits);
+            texels[0] = 0;
+            texels[1] = 0xffffffffu;
+            texels[2] = 0xffffffffu;
+            texels[3] = 0;
+            checker_->UnlockRect(0);
+        }
         vertices_.reserve(kBatchVertices);
     }
 
     // video: after a drawn frame, in external 3D mode.
     void draw(const rt::Video &video) {
         ++frame_;
+        uint64_t t = clock();
+        const auto lap = [&](int step) {
+            const uint64_t now = clock();
+            step_ticks[step] += now - t;
+            t = now;
+        };
         // A layer the runtime did not compose again is already in its texture.
         const bool scrolled = video.back_scrolled();
+        // Only its lines composed since (lines16_changed): all of them the first
+        // time and when the back layer moves between its two textures.
+        auto &layers = const_cast<rt::Video &>(video);
         if (video.background16_generation() != back_uploaded_ || scrolled != back_scrolled_) {
-            upload(video.background16(), scrolled ? background_over_ : background_);
+            const bool whole = back_uploaded_ == ~0ull || scrolled != back_scrolled_;
+            upload(video.background16(), scrolled ? background_over_ : background_, whole ? nullptr : video.lines16_changed(0));
             back_uploaded_ = video.background16_generation();
             back_scrolled_ = scrolled;
         }
+        layers.lines16_taken(0);
         if (video.foreground16_generation() != front_uploaded_) {
-            upload(video.foreground16(), foreground_);
+            upload(video.foreground16(), foreground_, front_uploaded_ == ~0ull ? nullptr : video.lines16_changed(1));
             front_uploaded_ = video.foreground16_generation();
         }
+        layers.lines16_taken(1);
         if (scrolled) update_scroll(video);
+        lap(0);
         const auto &polys = video.gpu_polys();
         const rt::VideoMem &mem = video.gpu_mem();
         bury();
         if (texture_bytes_ > kBudget) evict();
+        else evict_palettes();
         sort(polys);
         ++colour_stamp_;
         builds_ = 0;
         build_deadline_ = clock() + kBuildTicks;
+        lap(1);
 
         if (scrolled) {
             scroll_quads(video.scroll_x(), video.scroll_y());
@@ -103,13 +137,15 @@ public:
             const rt::GeoPoly &poly = polys[e.index];
             e.material = nullptr;
             if (!visible(poly, video)) continue;
-            if ((poly.texheader[0] >> 14) & 1) e.material = material_for(poly, mem);
+            if ((poly.texheader[0] >> 14) & 1) e.material = cached_material(poly, mem);
         }
+        lap(2);
 
+        write_checker();
         polygon_state();
-        drawn = textured = 0;
+        drawn = textured = checkered = 0;
         current_ = nullptr;
-        bool current_set = false;
+        bool current_set = false, current_checker = false;
         for (auto e = order_.rbegin(); e != order_.rend(); ++e) {
             const rt::GeoPoly &poly = polys[e->index];
             if (!visible(poly, video)) continue;
@@ -117,30 +153,48 @@ public:
             Material *material = nullptr;
             if (renderer & 2) material = e->material;
             else if (renderer & 1) continue; // as the Vita and the Dreamcast: not drawn
-            if (!current_set || material != current_) {
+            const bool checker = (poly.texheader[0] >> 15) & 1;
+            if (!current_set || material != current_ || checker != current_checker) {
                 flush();
                 bind(material);
+                if (!current_set || checker != current_checker)
+                    device_->SetRenderState(D3DRS_STENCILENABLE, checker ? TRUE : FALSE);
                 current_set = true;
+                current_checker = checker;
             }
             if (polygon(poly, video, colour(poly, mem, material), material)) {
                 ++drawn;
                 if (material) ++textured;
+                if (checker) ++checkered;
             }
         }
         flush();
+        device_->SetRenderState(D3DRS_STENCILENABLE, FALSE);
         device_->SetTexture(0, nullptr);
         display_.draw_texels(foreground_, 0, 0, float(kW), float(kH), kOffsetX, 0, kW * kScale, kH * kScale, true);
+        lap(3);
     }
 
-    // The last frame: polygons drawn (of them textured); the cache.
-    unsigned drawn = 0, textured = 0;
+    // Time in draw's steps since cleared (QueryPerformanceCounter ticks):
+    // the tile layers' uploads, the cache upkeep and sort, the materials, the
+    // polygons (and the layers' quads).
+    uint64_t step_ticks[4] = {};
+    static double milliseconds(uint64_t ticks) { return double(ticks) * 1000.0 / double(ticks_per_second()); }
+    static uint64_t ticks_per_second() {
+        LARGE_INTEGER frequency;
+        QueryPerformanceFrequency(&frequency);
+        return uint64_t(frequency.QuadPart);
+    }
+
+    // The last frame: polygons drawn (of them textured, and checker ones); the cache.
+    unsigned drawn = 0, textured = 0, checkered = 0;
     size_t materials() const { return materials_.size(); }
     size_t palettes() const { return palettes_.size(); }
     size_t texture_bytes() const { return texture_bytes_; }
     unsigned evictions = 0, rebuilt_sources = 0, hd_loaded = 0;
     // Since the start: sources read (texel decodes), source textures built,
     // and textures that waited a frame for the build budget.
-    unsigned source_reads = 0, built = 0, deferred = 0;
+    unsigned source_reads = 0, built = 0, deferred = 0, palettes_made = 0;
 
 private:
     static constexpr int kW = rt::Video::W, kH = rt::Video::H;
@@ -192,14 +246,15 @@ private:
     }
 
     // A 16-bit layer (rows of rt::Video::kLayerStride, the first kH shown)
-    // into a linear 512-wide texture.
+    // into a linear 512-wide texture: the rows flagged in lines, or all.
     static_assert(rt::Video::kLayerStride == 512, "a layer's rows are its texture's");
-    static void upload(const std::vector<uint16_t> &layer, IDirect3DTexture8 *texture) {
+    static void upload(const std::vector<uint16_t> &layer, IDirect3DTexture8 *texture, const uint8_t *lines) {
         if (layer.size() < size_t(512) * kH) return;
         D3DLOCKED_RECT locked;
         if (FAILED(texture->LockRect(0, &locked, nullptr, 0))) return;
         for (int y = 0; y < kH; ++y)
-            std::memcpy(static_cast<uint8_t *>(locked.pBits) + size_t(y) * locked.Pitch, &layer[size_t(y) * 512], 512 * 2);
+            if (!lines || lines[y])
+                std::memcpy(static_cast<uint8_t *>(locked.pBits) + size_t(y) * locked.Pitch, &layer[size_t(y) * 512], 512 * 2);
         texture->UnlockRect(0);
     }
 
@@ -301,6 +356,24 @@ private:
         return slot.argb;
     }
     struct ColourSlot { uint32_t stamp, key, argb; };
+
+    // Within a frame a polygon's material depends only on its texture header
+    // words 0-2 (luma, palette and texture RAM change between frames, not
+    // within one): this frame's lookups, direct-mapped, in front of
+    // material_for's hashing (most of a frame's polygons share a few dozen).
+    Material *cached_material(const rt::GeoPoly &poly, const rt::VideoMem &mem) {
+        const uint32_t a = poly.texheader[0], b = poly.texheader[1], c = poly.texheader[2];
+        uint32_t h = a * 0x9e3779b1u ^ b * 0x85ebca6bu ^ c * 0xc2b2ae35u;
+        h ^= h >> 15;
+        MaterialSlot &slot = material_slots_[h & (kMaterialSlots - 1)];
+        if (slot.stamp == colour_stamp_ && slot.a == a && slot.b == b && slot.c == c) return slot.material;
+        Material *material = material_for(poly, mem);
+        slot = {colour_stamp_, a, b, c, material};
+        return material;
+    }
+    struct MaterialSlot { uint32_t stamp, a, b, c; Material *material; };
+    static constexpr uint32_t kMaterialSlots = 512;
+    MaterialSlot material_slots_[kMaterialSlots] = {};
     static constexpr uint32_t kColourSlots = 1024;
     ColourSlot colours_[kColourSlots] = {};
     uint32_t colour_stamp_ = 1;
@@ -441,7 +514,10 @@ private:
     // The palette of these greys, shared by every texture lit the same way.
     IDirect3DPalette8 *palette_for(uint64_t key, const uint32_t greys[16]) {
         auto found = palettes_.find(key);
-        if (found != palettes_.end()) return found->second;
+        if (found != palettes_.end()) {
+            found->second.used = frame_;
+            return found->second.palette;
+        }
         IDirect3DPalette8 *palette = nullptr;
         if (FAILED(device_->CreatePalette(D3DPALETTE_32, &palette))) return nullptr;
         D3DCOLOR *colours = nullptr;
@@ -451,7 +527,8 @@ private:
         }
         for (unsigned i = 0; i < 32; ++i) colours[i] = i < 16 ? greys[i] : 0;
         palette->Unlock();
-        palettes_.emplace(key, palette);
+        palettes_.emplace(key, Palette{palette, frame_});
+        ++palettes_made;
         return palette;
     }
 
@@ -511,6 +588,7 @@ private:
             retire(it->second);
             sources_.erase(it);
         }
+        evict_palettes();
         for (auto it = materials_.begin(); it != materials_.end();) {
             if (frame_ - it->second.used > 1800) {
                 if (it->second.hd_bytes) {
@@ -525,6 +603,23 @@ private:
         ++evictions;
     }
 
+    // Past kPalettes, the least recently used palettes (never one used in
+    // the last two frames) go, down to three quarters of it: a lighting
+    // table the game animates makes a new palette for every step.
+    void evict_palettes() {
+        if (palettes_.size() <= kPalettes) return;
+        std::vector<std::pair<uint64_t, uint64_t>> by_age; // (last used, key)
+        for (const auto &[key, palette] : palettes_)
+            if (frame_ - palette.used > 2) by_age.emplace_back(palette.used, key);
+        std::sort(by_age.begin(), by_age.end());
+        for (const auto &[used, key] : by_age) {
+            if (palettes_.size() <= kPalettes / 4 * 3) break;
+            auto it = palettes_.find(key);
+            graveyard_.emplace_back(frame_, it->second.palette);
+            palettes_.erase(it);
+        }
+    }
+
     // A source's texture to the graveyard: released once the GPU is past it.
     void retire(Source &s) {
         if (!s.texture) return;
@@ -534,9 +629,9 @@ private:
     }
     void bury() {
         size_t kept = 0;
-        for (auto &[frame, texture] : graveyard_) {
-            if (frame_ - frame >= 3) texture->Release();
-            else graveyard_[kept++] = {frame, texture};
+        for (auto &[frame, resource] : graveyard_) {
+            if (frame_ - frame >= 3) resource->Release();
+            else graveyard_[kept++] = {frame, resource};
         }
         graveyard_.resize(kept);
     }
@@ -550,6 +645,51 @@ private:
         LARGE_INTEGER frequency;
         QueryPerformanceFrequency(&frequency);
         return uint64_t(frequency.QuadPart) * microseconds / 1000000;
+    }
+
+    // The checkerboard into the stencil (1 where x ^ y is odd), over the
+    // whole picture: the checker texture's texels alpha-tested, colour
+    // writes off. Checker polygons then draw where it is 1 (polygon_state).
+    void write_checker() {
+        struct Vertex { float x, y, z, rhw, u, v; };
+        const float w = 640.f, h = 480.f;
+        const Vertex quad[4] = {{-.5f, -.5f, 0, 1, 0, 0},
+                                {w - .5f, -.5f, 0, 1, w / 2, 0},
+                                {-.5f, h - .5f, 0, 1, 0, h / 2},
+                                {w - .5f, h - .5f, 0, 1, w / 2, h / 2}};
+        device_->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+        device_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        device_->SetRenderState(D3DRS_LIGHTING, FALSE);
+        device_->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+        device_->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
+        device_->SetRenderState(D3DRS_ALPHAREF, 0x80);
+        device_->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATEREQUAL);
+        device_->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+        device_->SetRenderState(D3DRS_STENCILENABLE, TRUE);
+        device_->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_ALWAYS);
+        device_->SetRenderState(D3DRS_STENCILREF, 1);
+        device_->SetRenderState(D3DRS_STENCILMASK, 0xff);
+        device_->SetRenderState(D3DRS_STENCILWRITEMASK, 0xff);
+        device_->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_REPLACE);
+        device_->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_KEEP);
+        device_->SetRenderState(D3DRS_STENCILZFAIL, D3DSTENCILOP_KEEP);
+        device_->SetTexture(0, checker_);
+        device_->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        device_->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        device_->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        device_->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        device_->SetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_POINT);
+        device_->SetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_POINT);
+        device_->SetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_WRAP);
+        device_->SetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_WRAP);
+        device_->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        device_->SetVertexShader(D3DFVF_XYZRHW | D3DFVF_TEX1);
+        device_->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
+        device_->SetRenderState(D3DRS_COLORWRITEENABLE, D3DCOLORWRITEENABLE_ALL);
+        device_->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+        // For the checker polygons: drawn only where the stencil is 1.
+        device_->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_EQUAL);
+        device_->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_KEEP);
     }
 
     void polygon_state() {
@@ -625,6 +765,7 @@ private:
     IDirect3DDevice8 *device_;
     HdTextures &hd_;
     IDirect3DTexture8 *background_ = nullptr, *background_over_ = nullptr, *foreground_ = nullptr, *scroll_ = nullptr;
+    IDirect3DTexture8 *checker_ = nullptr;
     uint64_t back_uploaded_ = ~0ull, front_uploaded_ = ~0ull;
     bool back_scrolled_ = false;
     uint64_t frame_ = 0, build_deadline_ = 0;
@@ -638,8 +779,10 @@ private:
     std::vector<uint8_t> scratch_;
     std::unordered_map<uint32_t, Source> sources_;
     std::unordered_map<uint64_t, Material> materials_;
-    std::unordered_map<uint64_t, IDirect3DPalette8 *> palettes_; // by luma values and transparency
-    std::vector<std::pair<uint64_t, IDirect3DTexture8 *>> graveyard_; // (frame let go, texture)
+    struct Palette { IDirect3DPalette8 *palette; uint64_t used; };
+    static constexpr size_t kPalettes = 256;
+    std::unordered_map<uint64_t, Palette> palettes_; // by luma values and transparency
+    std::vector<std::pair<uint64_t, IDirect3DResource8 *>> graveyard_; // (frame let go, texture or palette)
     uint8_t gamma_[256] = {};
 };
 

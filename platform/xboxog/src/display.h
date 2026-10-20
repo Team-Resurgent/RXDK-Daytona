@@ -27,9 +27,11 @@ public:
         pp.BackBufferHeight = kHeight;
         pp.BackBufferFormat = D3DFMT_X8R8G8B8;
         pp.BackBufferCount = 1;
-        // No depth buffer: everything is drawn in the game's order, with no
-        // depth test (renderer.h), and its 1.2 MB is better spent elsewhere.
-        pp.EnableAutoDepthStencil = FALSE;
+        // No depth test (renderer.h draws in the game's order), but a stencil:
+        // Model 2's checker polygons (its translucency, every other pixel)
+        // are drawn through a checkerboard written into it.
+        pp.EnableAutoDepthStencil = TRUE;
+        pp.AutoDepthStencilFormat = D3DFMT_D24S8;
         pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
         // A frame that misses its vblank goes out at once rather than
         // waiting a whole one more: Model 2 runs at 57.5 Hz, the Xbox at 60.
@@ -40,7 +42,7 @@ public:
 
     IDirect3DDevice8 *device() const { return device_; }
 
-    void clear() { device_->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1.f, 0); }
+    void clear() { device_->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.f, 0); }
     void present() { device_->Present(nullptr, nullptr, nullptr, nullptr); }
 
     // The CPU path: copy the composed screen and draw it.
@@ -72,6 +74,7 @@ public:
             {x + cw - .5f, y + ch - .5f, 0, 1, u1, v1},
         };
         device_->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+        device_->SetRenderState(D3DRS_STENCILENABLE, FALSE);
         device_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
         device_->SetRenderState(D3DRS_LIGHTING, FALSE);
         device_->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
